@@ -114,8 +114,20 @@ def doctor() -> None:
         typer.echo(f"  ✓ robotframework {robot.__version__}")
     except Exception as e:
         typer.echo(f"  ✗ robotframework: {e}")
-    chosen = os.environ.get("AITESTER_BROWSER", "playwright").lower()
-    typer.echo(f"  ℹ AITESTER_BROWSER={chosen} (default: playwright)")
+    chosen = os.environ.get("AITESTER_BROWSER", "agent-browser").lower()
+    typer.echo(f"  ℹ AITESTER_BROWSER={chosen} (default: agent-browser)")
+
+    # agent-browser backend status — same CLI as Explore phase.
+    try:
+        r = subprocess.run(["agent-browser", "--version"], capture_output=True, text=True, timeout=5)
+        ver = r.stdout.strip() or r.stderr.strip()
+        typer.echo(f"  ✓ agent-browser backend: {ver} (zero-install, same driver as authoring)")
+    except FileNotFoundError:
+        tag = "⚠" if chosen == "agent-browser" else "ℹ"
+        typer.echo(
+            f"  {tag} agent-browser backend: CLI not found "
+            f"(install: `npm i -g agent-browser`)"
+        )
 
     # Playwright backend status
     try:

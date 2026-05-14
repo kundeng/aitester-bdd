@@ -42,24 +42,24 @@ Do not use when: there's no live target to drive (no URL); the user is hand-writ
 | Refine | If a real run fails, re-explore the failing step, patch the suite. | `agent-browser` + edit |
 | Ship | Hand `suite.robot` to the user. They run `robot suite.robot` without you. | — |
 
-### Two distinct browsers in the stack — don't confuse them
+### Three runtime backends, one authored suite
 
-**Explore (authoring time)**: the `agent-browser` CLI. Ships with its own
-browser, no init step. You drive it. Independent of the test execution
-backend.
+The authored `.robot` declares only `Library  aitester_bdd.AITester`. At
+run time, the walker dispatches to whichever backend `AITESTER_BROWSER`
+selects. All three present the same DOM-driving surface; **the same
+suite runs on all three.**
 
-**Test execution (running the authored suite)**: you pick at runtime
-via `AITESTER_BROWSER` env var. Two backends, same authored `.robot`:
+| Backend (`AITESTER_BROWSER=`) | When to pick | Setup needed |
+|------------------------------|--------------|--------------|
+| `agent-browser` (default) | Most cases. Same CLI you used during Explore, so the run-time DOM view is identical to the author-time one — no cross-driver selector drift. | None — the CLI ships its own browser. |
+| `playwright` | Action-heavy tests where subprocess-per-call latency matters; in-process Playwright is faster. | `aitester init-browser` once (downloads Playwright browsers). |
+| `nodriver` | Sites with bot detection (DataDome, Cloudflare Bot Management, PerimeterX, etc.) that fingerprint Playwright. Or when you want to skip the Playwright install entirely. | `pip install aitester-bdd[stealth]` + Edge or Chrome on the system. |
 
-| Backend | When | Setup needed |
-|---------|------|--------------|
-| `playwright` (default) | Most internal apps | `aitester init-browser` once (downloads Playwright browsers) |
-| `nodriver` | Sites with bot detection (DataDome, Cloudflare BM, etc.) **or** when you want to skip the Playwright install entirely | `pip install aitester-bdd[stealth]` and have Edge or Chrome on the system |
-
-The authored `.robot` file declares only `Library  aitester_bdd.AITester`
-— our walker dispatches to whichever backend `AITESTER_BROWSER` selects.
-The author does NOT need to write a different `.robot` file for nodriver
-mode; the same suite runs on either backend.
+Picking a backend doesn't change the authored suite. It changes only
+the driver underneath. If a test passes against `agent-browser` but
+fails against `playwright` (or vice versa), that's a real cross-driver
+DOM-view bug — file it. The default of `agent-browser` minimizes that
+risk because the agent that authored the suite was already driving it.
 
 ### `agent-browser` quick reference
 

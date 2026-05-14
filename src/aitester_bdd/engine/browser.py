@@ -72,21 +72,34 @@ class _NullBrowser:
 def BrowserAdapter():
     """Factory — returns the configured backend.
 
-    `AITESTER_BROWSER=nodriver` → NodriverBackend (raw CDP via Chrome/Edge,
-    bot-detection-resistant, no rfbrowser init needed).
+    `AITESTER_BROWSER` selects which:
 
-    Otherwise → _PlaywrightBackend (rfbrowser/Playwright, the default).
+      - `agent-browser` (default) → AgentBrowserBackend. Same CLI as
+        the Explore phase, so author-time and run-time DOM views are
+        identical. Zero install friction (the CLI ships its own browser).
+        Slower per action (subprocess), but fine for most tests.
 
-    Either way the returned object exposes the same public surface, so the
-    walker is backend-agnostic.
+      - `playwright` → _PlaywrightBackend (rfbrowser/Playwright). In-process
+        speed for action-heavy tests. Requires `aitester init-browser`.
+
+      - `nodriver` → NodriverBackend (raw CDP via Chrome/Edge). For sites
+        with bot-detection that targets Playwright, or to skip rfbrowser
+        init when Chrome/Edge is already installed. Needs
+        `pip install aitester-bdd[stealth]`.
+
+    All three expose the same public surface; the walker is backend-agnostic.
     """
     import os
 
-    choice = os.environ.get("AITESTER_BROWSER", "playwright").strip().lower()
+    choice = os.environ.get("AITESTER_BROWSER", "agent-browser").strip().lower()
     if choice == "nodriver":
         from aitester_bdd.engine.nodriver_backend import NodriverBackend
         return NodriverBackend()
-    return _PlaywrightBackend()
+    if choice == "playwright":
+        return _PlaywrightBackend()
+    # Default: agent-browser CLI.
+    from aitester_bdd.engine.agent_browser_backend import AgentBrowserBackend
+    return AgentBrowserBackend()
 
 
 class _PlaywrightBackend:
