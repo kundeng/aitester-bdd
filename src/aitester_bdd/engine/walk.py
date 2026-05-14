@@ -849,6 +849,20 @@ def _walk_rule(
             registry.fire_after_rule(verification, scenario, rule, result)
         return result
 
+    # ── Capture pipeline (artifact model — TIER 1 from WISE) ─────────
+    # If the rule declared `Then I extract fields` or `Then I extract
+    # table`, build a record now. Invoke post_extract hooks to normalize.
+    # Then push to every artifact in rule.emit_targets, honoring flatten
+    # and merge semantics.
+    if rule.has_capture:
+        try:
+            record = _extract_record(browser, rule)
+            if record is not None:
+                record = _invoke_hooks_post_extract(verification, record)
+                _emit_to_artifacts(verification, rule, record, scenario)
+        except Exception as exc:
+            log.warning("capture pipeline failed for rule %r: %s", rule.name, exc)
+
     result = RuleResult(
         rule_name=rule.name, scenario_name=scenario.name, passed=True,
         duration_ms=(time.time() - start) * 1000,
@@ -856,6 +870,328 @@ def _walk_rule(
     if registry is not None:
         registry.fire_after_rule(verification, scenario, rule, result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Capture pipeline — extract → hook transforms → emit to artifacts
+# ---------------------------------------------------------------------------
+
+
+def _extract_record(browser: BrowserAdapter, rule: Any) -> dict | None:
+    """Build a record from the rule's field_specs and/or table_spec.
+
+    field_specs produce one record with named fields.
+    table_spec produces a list of records (one per data row) which we
+    flatten into the record under the table's name as a list.
+    """
+    data: dict = {}
+    for fs in rule.field_specs:
+        data[fs.name] = _extract_field(browser, fs)
+    if rule.table_spec is not None:
+        rows = _extract_table_rows(browser, rule.table_spec)
+        data[rule.table_spec.name] = rows
+    if not data:
+        return None
+    return {
+        "data": data,
+        "rule": rule.name,
+        "url": browser.url(),
+        "extracted_at": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).isoformat(),
+    }
+
+
+def _extract_field(browser: BrowserAdapter, fs: Any) -> Any:
+    """Dispatch field extraction by extractor type."""
+    from urllib.parse import urljoin
+    css = browser.resolve_fallback_selector(fs.locator) if fs.locator else ""
+    try:
+        if fs.extractor == "text":
+            return browser.get_text(css).strip() if css else ""
+        if fs.extractor == "attr":
+            return browser.get_attribute(css, fs.attr) if css and fs.attr else ""
+        if fs.extractor == "value":
+            return browser.get_value(css) if css else ""
+        if fs.extractor == "class":
+            return browser.get_class(css) if css else ""
+        if fs.extractor == "html":
+            v = browser.evaluate_js(
+                f"(document.querySelector({_json_str(css)})||{{}}).outerHTML || ''"
+            )
+            return str(v or "")
+        if fs.extractor == "link":
+            href = browser.get_attribute(css, "href") if css else ""
+            if href and not href.startswith(("http://", "https://", "javascript:", "#")):
+                page_url = browser.url()
+                try:
+                    href = urljoin(page_url, href)
+                except Exception:
+                    pass
+            return href
+        if fs.extractor == "number":
+            text = browser.get_text(css) if css else ""
+            cleaned = re.sub(r"[^\d.\-]", "", text)
+            try:
+                return float(cleaned) if "." in cleaned else int(cleaned)
+            except (ValueError, TypeError):
+                return text
+        if fs.extractor == "grouped":
+            count = browser.get_count(css) if css else 0
+            results = []
+            for i in range(count):
+                t = browser.get_text(f"{css} >> nth={i}").strip()
+                if t:
+                    results.append(t)
+            return results
+    except Exception as exc:
+        log.debug("extract_field %r failed: %s", fs.name, exc)
+    return ""
+
+
+def _json_str(s: str) -> str:
+    """Safe JSON-encode for embedding in JS."""
+    import json
+    return json.dumps(s)
+
+
+def _extract_table_rows(browser: BrowserAdapter, tspec: Any) -> list[dict]:
+    """Pull rows from a <table>: locate, querySelectorAll('tr'), map header text
+    to column index, build per-row records."""
+    css = browser.resolve_fallback_selector(tspec.locator)
+    js = (
+        f"() => {{ const t = document.querySelector({_json_str(css)}); "
+        f"if (!t) return null; "
+        f"const rows = t.querySelectorAll('tr'); "
+        f"return Array.from(rows).map(r => Array.from(r.querySelectorAll('th,td'))"
+        f".map(c => (c.textContent || '').trim())); }}"
+    )
+    try:
+        raw = browser.evaluate_js(js)
+    except Exception:
+        return []
+    if not raw or not isinstance(raw, list):
+        return []
+    if len(raw) <= tspec.header_row:
+        return []
+    headers = raw[tspec.header_row]
+    if not isinstance(headers, list):
+        return []
+    # Map field.header -> column index
+    col_for: dict[str, int] = {}
+    for fs in tspec.fields:
+        for idx, h in enumerate(headers):
+            if h == fs.header:
+                col_for[fs.name] = idx
+                break
+    records: list[dict] = []
+    for row in raw[tspec.header_row + 1:]:
+        if not isinstance(row, list) or not any(row):
+            continue
+        rec: dict = {}
+        for fname, idx in col_for.items():
+            rec[fname] = row[idx] if idx < len(row) else ""
+        records.append(rec)
+    return records
+
+
+def _invoke_hooks_post_extract(verification: Any, record: dict) -> dict:
+    """Run post_extract hook transforms on the record's `data` field.
+
+    Transforms (applied in registration order, then in dict insertion
+    order within each hook):
+      rename=old:new
+      drop=field
+      strip_html=field
+      lowercase=field
+      default=field:value
+      regex=field:pattern:replacement
+    """
+    data = dict(record.get("data") or {})
+    for hook in verification.hooks:
+        if hook.lifecycle_point != "post_extract":
+            continue
+        for key, val in hook.config.items():
+            try:
+                if key == "rename" and ":" in val:
+                    old, new = val.split(":", 1)
+                    if old in data:
+                        data[new] = data.pop(old)
+                elif key == "drop" and val in data:
+                    del data[val]
+                elif key == "strip_html" and val in data:
+                    data[val] = re.sub(r"<[^>]+>", "", str(data[val]))
+                elif key == "lowercase" and val in data:
+                    data[val] = str(data[val]).lower()
+                elif key == "default" and ":" in val:
+                    fname, default_val = val.split(":", 1)
+                    if not data.get(fname):
+                        data[fname] = default_val
+                elif key == "regex" and val.count(":") >= 2:
+                    parts = val.split(":", 2)
+                    fname, pattern, replacement = parts
+                    if fname in data:
+                        data[fname] = re.sub(pattern, replacement, str(data[fname]))
+            except Exception as exc:
+                log.warning("hook %r transform %s=%s failed: %s", hook.name, key, val, exc)
+    record["data"] = data
+    return record
+
+
+def _emit_to_artifacts(verification: Any, rule: Any, record: dict, scenario: Any) -> None:
+    """Push the record into every artifact in rule.emit_targets, applying
+    flatten and merge semantics per WISE _emit_records.
+
+    Table records are special: the table spec's own name was added to
+    emit_targets; we flatten the rows list under that name into the
+    artifact (one record per table row).
+    """
+    data = record.get("data") or {}
+    for target in rule.emit_targets:
+        verification.artifact_store.setdefault(target, [])
+        bag = verification.artifact_store[target]
+
+        # Table-auto-emit: if data[target] is a list and target matches
+        # the table's name, flatten without per-rule flatten declaration.
+        if (
+            rule.table_spec is not None
+            and rule.table_spec.name == target
+            and isinstance(data.get(target), list)
+        ):
+            for row in data[target]:
+                if isinstance(row, dict):
+                    bag.append({
+                        "data": row,
+                        "rule": rule.name,
+                        "url": record.get("url", ""),
+                        "extracted_at": record.get("extracted_at", ""),
+                        "scenario": scenario.name,
+                    })
+            continue
+
+        # Explicit flatten_by
+        flatten_field = rule.emit_flatten_by.get(target)
+        if flatten_field:
+            items = data.get(flatten_field, [])
+            if isinstance(items, list):
+                for item in items:
+                    item_data = item if isinstance(item, dict) else {flatten_field: item}
+                    bag.append({
+                        "data": item_data,
+                        "rule": rule.name,
+                        "url": record.get("url", ""),
+                        "extracted_at": record.get("extracted_at", ""),
+                        "scenario": scenario.name,
+                    })
+            continue
+
+        # Merge by key
+        merge_key = rule.emit_merge_on.get(target)
+        if merge_key:
+            key_val = data.get(merge_key)
+            if key_val is not None:
+                for existing in bag:
+                    if (existing.get("data") or {}).get(merge_key) == key_val:
+                        existing["data"].update(data)
+                        break
+                else:
+                    bag.append({**record, "scenario": scenario.name})
+            else:
+                bag.append({**record, "scenario": scenario.name})
+            continue
+
+        # Plain emit
+        bag.append({**record, "scenario": scenario.name})
+
+
+# ---------------------------------------------------------------------------
+# Quality gates — evaluated at scenario teardown.
+# ---------------------------------------------------------------------------
+
+
+def _check_quality_gates(verification: Any, scenario: Any) -> list:
+    """Evaluate every QualityGate, return a list of synthetic RuleResults
+    for any failures. Each failure fails the scenario."""
+    from aitester_bdd.engine.verdict import RuleResult
+
+    failures: list = []
+    for art_name, qg in verification.quality_gates.items():
+        records = verification.artifact_store.get(art_name, [])
+        n = len(records)
+
+        if qg.min_records is not None and n < qg.min_records:
+            failures.append(RuleResult(
+                rule_name=f"quality_gate:{art_name}:min_records",
+                scenario_name=scenario.name,
+                passed=False,
+                failure_step_kind="quality_gate",
+                failure_step_repr=f"min_records >= {qg.min_records}",
+                failure_message=f"artifact {art_name!r} has {n} records, required >= {qg.min_records}",
+                expected=str(qg.min_records),
+                observed=str(n),
+            ))
+
+        for fname, min_pct in qg.filled_pcts.items():
+            total = 0
+            filled = 0
+            for r in records:
+                d = r.get("data") or {}
+                if fname in d:
+                    total += 1
+                    v = d[fname]
+                    if v not in (None, "", [], {}):
+                        filled += 1
+            if total > 0:
+                actual = (filled / total) * 100
+                if actual < min_pct:
+                    failures.append(RuleResult(
+                        rule_name=f"quality_gate:{art_name}:filled_pct:{fname}",
+                        scenario_name=scenario.name,
+                        passed=False,
+                        failure_step_kind="quality_gate",
+                        failure_step_repr=f"filled_pct({fname}) >= {min_pct}%",
+                        failure_message=(
+                            f"artifact {art_name!r} field {fname!r} filled "
+                            f"{actual:.1f}%, required >= {min_pct}%"
+                        ),
+                        expected=f"{min_pct}%",
+                        observed=f"{actual:.1f}%",
+                    ))
+    return failures
+
+
+def _write_artifacts(verification: Any) -> None:
+    """Write each artifact (with `output=True`) to <output_dir>/<name>.jsonl
+    at scenario teardown. Honors dedupe."""
+    import json
+    from aitester_bdd.engine.emit import _output_dir
+
+    output_dir = _output_dir()
+    for art_name, art in verification.artifacts.items():
+        if not art.output:
+            continue
+        records = verification.artifact_store.get(art_name, [])
+        if not records:
+            continue
+        if art.dedupe:
+            seen: set = set()
+            deduped = []
+            for r in records:
+                key_val = (r.get("data") or {}).get(art.dedupe)
+                if key_val is None:
+                    deduped.append(r)
+                elif key_val not in seen:
+                    seen.add(key_val)
+                    deduped.append(r)
+            records = deduped
+        override = verification.write_overrides.get(art_name)
+        path = __import__("pathlib").Path(override) if override else output_dir / f"{art_name}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as fp:
+            for r in records:
+                fp.write(json.dumps(r, ensure_ascii=False, default=str))
+                fp.write("\n")
+        log.info("wrote artifact %r (%d records) to %s", art_name, len(records), path)
 
 
 # ---------------------------------------------------------------------------
@@ -1017,7 +1353,21 @@ def walk_verification(verification: "Verification") -> Verdict:
                 else:
                     scenario_passed = False
 
+            # ── Scenario teardown: artifact-model commitments ─────────
+            # Quality gates: evaluate each artifact's assertions; failures
+            # become synthetic RuleResults that fail the scenario.
+            qg_failures = _check_quality_gates(verification, sc)
+            for qf in qg_failures:
+                verdict.results.append(qf)
+                scenario_passed = False
+
             registry.fire_after_scenario(verification, sc, scenario_passed)
+
+        # ── Verification teardown: write artifact files ───────────────
+        # Writes each artifact (output=True) to <output_dir>/<name>.jsonl.
+        # Happens once after all scenarios complete so multi-scenario
+        # runs accumulate into single artifact files.
+        _write_artifacts(verification)
     finally:
         browser.close()
         walk_log.close()

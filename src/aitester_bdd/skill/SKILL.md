@@ -370,23 +370,217 @@ The full keyword surface for state checks:
 | `And I screenshot on enter` | Snapshot when the rule starts (for debugging entry state) |
 | `And I screenshot on fail` | Snapshot on any failure within the rule |
 
-### 4.7 Expansion (parametric scenarios)
+### 4.7 Artifacts — named bags of captured records (TIER 1 from WISE)
+
+When a test needs to **capture structured data** across one or more
+rules and assert against the bag at the end (differential testing,
+quality-gate assertions, multi-rule merging), use the artifact
+pipeline. For simple one-off captures, use § 12 `And I emit "${name}"`
+direct emit instead.
+
+The pipeline is four steps:
+
+  1. **Register** the artifact with a typed schema (`Given I register
+     artifact`).
+  2. **Set options** like dedupe + description (`And I set artifact
+     options for`).
+  3. **Extract** a record from the page (`Then I extract fields` or
+     `Then I extract table`).
+  4. **Emit** the record into the artifact bag (`And I emit to
+     artifact`, with optional `flattened by` or `merge into ... on key`).
+
+At scenario teardown, the walker writes each artifact to
+`<output_dir>/<artifact_name>.jsonl` and evaluates quality-gate
+assertions (§ 4.9).
+
+#### 4.7.1 Register the artifact
+
+```robot
+Given I register artifact "${name}"
+...    field=<field-name>   type=<string|number|url|array|boolean>   required=<true|false>
+...    field=<field-name>   type=<...>                                required=<...>
+```
+
+The schema is documentary in v1 (the agent reads it to know what to
+capture; the engine does NOT validate against it at emit time). One
+`field=` row per declared field. Example:
+
+```robot
+Given I register artifact "approved_cases"
+...    field=id         type=string   required=true
+...    field=status     type=string   required=true
+...    field=approver   type=string   required=false
+```
+
+#### 4.7.2 Set artifact options
+
+```robot
+And I set artifact options for "${name}"
+...    dedupe=<field-name>          # drop records where this field has been seen
+...    description=<text>           # human prose for the diagnose aspect
+...    output=<true|false>          # write to <output_dir>/<name>.jsonl (default true)
+```
+
+#### 4.7.3 Extract fields
+
+```robot
+Then I extract fields
+...    field=<name>  extractor=<text|attr|grouped|html|link|number|value|class>  locator=<css>
+...    field=<name>  extractor=<...>  locator=<...>  attr=<attr-name>   # attr= required for extractor=attr
+```
+
+Extractor reference:
+
+| extractor | What it produces |
+|-----------|------------------|
+| `text` | inner text of `locator`, trimmed |
+| `attr` | `getAttribute(<attr>)` on `locator` — needs `attr=<name>` |
+| `value` | input's `.value` property |
+| `class` | the `class` attribute |
+| `html` | `outerHTML` of `locator` |
+| `link` | `href` attribute, resolved to absolute URL via urljoin |
+| `number` | text content regex-extracted to int/float |
+| `grouped` | array of texts from every matching element under the scope |
+
+Example:
+
+```robot
+Then I extract fields
+...    field=id      extractor=attr   locator="[data-testid=case-row]"  attr=data-case-id
+...    field=title   extractor=text   locator=".case-title"
+...    field=detail  extractor=link   locator="a.detail"
+...    field=count   extractor=number locator=".items .badge"
+...    field=tags    extractor=grouped locator=".tag-chip"
+```
+
+#### 4.7.4 Extract a table
+
+Shorthand for "capture every row of this `<table>` as one record per
+data row, auto-emitted to its named artifact":
+
+```robot
+Then I extract table "${artifact-name}" from "${table-css}"
+...    header_row=<N>                 # row index of headers (default 0)
+...    field=<name>  header=<header-text>
+...    field=<name>  header=<header-text>
+```
+
+Each data row becomes one record with named fields per the
+field→header mapping. The artifact is auto-registered if not declared
+already; rows accumulate into it.
+
+```robot
+Then I extract table "case_summary" from "table[data-testid=summary]"
+...    header_row=0
+...    field=metric  header=Metric
+...    field=today   header=Today
+...    field=last_7  header=Last 7 days
+```
+
+#### 4.7.5 Emit to artifact
+
+```robot
+And I emit to artifact "${name}"                                # push current rule's record into the bag
+And I emit to artifact "${name}" flattened by "${field}"        # one record per element of the array field
+And I merge into artifact "${name}" on key "${field}"           # merge into existing record matching this key
+```
+
+- **Plain emit**: push the rule's most-recently-extracted record into
+  the artifact bag.
+- **Flattened by**: when an extractor returned an array (typically
+  `extractor=grouped`), emit one record per element rather than one
+  record containing the whole array.
+- **Merge on key**: when multi-rule walks build records together (rule
+  A captures base fields, rule B walks into details and captures more),
+  merge B's record INTO the existing A's record matching the key.
+
+```robot
+# Flatten example: emit one record per tag
+Then I extract fields  field=tags  extractor=grouped  locator=".tag-chip"
+And I emit to artifact "case_tags" flattened by "tags"
+
+# Merge example: enrich a case record with owner info
+I define rule "case_basics"
+    Then I extract fields
+    ...    field=id     extractor=attr  locator=.  attr=data-id
+    ...    field=title  extractor=text  locator="h3"
+    And I emit to artifact "cases"
+I define rule "case_owner"
+    And I declare parents "case_basics"
+    Then I extract fields
+    ...    field=id     extractor=attr  locator=.  attr=data-id
+    ...    field=owner  extractor=text  locator=".owner"
+    And I merge into artifact "cases" on key "id"
+```
+
+### 4.8 Quality gates — failing assertions on the artifact bag
+
+Unlike WISE (which only warns), aitester-bdd's quality gates **fail
+the scenario** when violated. Each becomes a synthetic RuleResult
+named `quality_gate:<artifact>:<gate>` appended to the Verdict.
+
+```robot
+And I set quality gate min records to <N>                       # bag must have >= N records
+And I set filled percentage for "<field>" to <N>                # >= N% of records must have non-empty value for <field>
+And I set max failed percentage to <N>                          # (across expansion) no more than N% of iterations may fail
+```
+
+Gates attach to the **most-recently-mentioned artifact** — usually the
+one you just `register`ed or `set artifact options for`. Example:
+
+```robot
+Given I register artifact "approved_cases"
+...    field=id      type=string  required=true
+...    field=status  type=string  required=true
+And I set artifact options for "approved_cases"
+...    dedupe=id
+And I set quality gate min records to 5
+And I set filled percentage for "id" to 100
+And I set filled percentage for "status" to 100
+```
+
+This declares: "the scenario must produce at least 5 distinct cases,
+every record must have an id, every record must have a status."
+
+### 4.9 Hook lifecycle — transforms on captured records
+
+Hooks normalize records between extraction and emit, so artifact data
+is uniform across runs (good for differential testing).
+
+```robot
+And I register hook "${name}" at "${lifecycle_point}"
+...    rename=<old-field>:<new-field>
+...    drop=<field>
+...    strip_html=<field>
+...    lowercase=<field>
+...    default=<field>:<value>
+...    regex=<field>:<pattern>:<replacement>
+```
+
+Supported lifecycle point in v1: **`post_extract`** — fires after a
+rule's `Then I extract fields` / `Then I extract table` builds the
+record, **before** it is emitted to artifacts.
+
+Transforms apply in order. Example:
+
+```robot
+And I register hook "normalize_cases" at "post_extract"
+...    rename=case_id:id
+...    drop=_internal_marker
+...    strip_html=description
+...    lowercase=status
+...    default=approver:unknown
+...    regex=detail:^/:https://app.example.com/
+```
+
+### 4.10 Hooks & Interrupts (engine-level)
 
 | Keyword | Purpose |
 |---------|---------|
-| `When I expand over elements "${css}"` | Run child rules per matched element; options: `limit=`, `exclude_if=` |
-| `When I expand over data "${path}"` | Run child rules per CSV/JSON row |
-| `When I expand over combinations` | Cartesian product across `control=`/`values=` axes |
-
-### 4.8 Hooks & Interrupts
-
-| Keyword | Purpose |
-|---------|---------|
-| `And I register hook "${name}" at "${point}"` | Points: `before_scenario`, `after_scenario`, `before_rule`, `after_rule`, `on_failure` |
-| `And I configure interrupts` | Auto-dismiss overlays: `dismiss=<css>` (must be surgical — § 6.4) |
+| `And I configure interrupts` | Auto-dismiss overlays: `dismiss=<css>` (must be surgical — § 6.5) |
 | `And I configure state setup` | Pre-test auth: `skip_when=<url>`, `action=open url=`, `action=input css= value=`, `action=password css= value=`, `action=click css=` |
 
-### 4.9 Timing & Debug
+### 4.11 Timing & Debug
 
 | Keyword | Notes |
 |---------|-------|
@@ -394,7 +588,7 @@ The full keyword surface for state checks:
 | `When I wait for idle` | Network idle (sparingly — observation gates preferred) |
 | `When I take screenshot` | Optional: `filename=<path>` — auto-fires on rule failure if `on_failure` hook installed |
 
-### 4.10 Passthrough (escape hatches)
+### 4.12 Passthrough (escape hatches)
 
 | Keyword | Notes |
 |---------|-------|

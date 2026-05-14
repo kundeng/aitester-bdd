@@ -106,6 +106,120 @@ class Emit:
 
 
 @dataclass
+class FieldSpec:
+    """One field captured by `Then I extract fields`.
+
+    Extractors (mirrors WISE, but `image` is dropped as testing rarely
+    needs raw image src):
+      text     — `inner_text()` of the locator (trimmed)
+      attr     — `getAttribute(attr_name)` on the locator
+      grouped  — array of texts from all matches of locator (within scope)
+      html     — `outerHTML` of the locator
+      link     — href, resolved to absolute URL via urljoin
+      number   — text content regex-extracted to int/float
+      value    — input's `value` property
+      class    — `class` attribute
+    """
+
+    name: str
+    extractor: str  # text | attr | grouped | html | link | number | value | class
+    locator: str
+    attr: str = ""
+
+
+@dataclass
+class TableFieldSpec:
+    """One column-to-field mapping in `Then I extract table`.
+
+    `header` is the visible text of the column in the table's header row.
+    Walker matches this against the actual header texts to find the
+    column index, then takes that cell from each data row.
+    """
+
+    name: str
+    header: str
+
+
+@dataclass
+class TableSpec:
+    """Capture a HTML table's rows as records.
+
+    `header_row` is the row index containing column headers (0-based).
+    Each subsequent row becomes one record with named fields per the
+    `fields` mapping.
+    """
+
+    name: str
+    locator: str
+    header_row: int = 0
+    fields: list[TableFieldSpec] = field(default_factory=list)
+
+
+@dataclass
+class ArtifactSchema:
+    """Named accumulation bag — multiple rules across a scenario can
+    `emit to artifact "${name}"` and their records pile up here.
+
+    `fields` is a list of `{field, type, required}` dicts declared at
+    `register artifact` time. Schema is documentary in v1 (not validated
+    at emit time); the agent reads it to know what shape to capture.
+
+    `dedupe` is an optional field name; if set, the writer drops records
+    where the dedupe field value has been seen before in the same bag.
+
+    `description` is human prose explaining what this artifact captures
+    — read by the diagnose aspect when summarizing what went wrong.
+    """
+
+    name: str
+    fields: list[dict] = field(default_factory=list)
+    dedupe: str = ""
+    description: str = ""
+    output: bool = True  # write to disk at scenario teardown
+
+
+@dataclass
+class QualityGate:
+    """Test assertions on an artifact, evaluated at scenario teardown.
+
+    Unlike WISE (which only warns), failing a quality gate FAILS the
+    scenario with a synthetic RuleResult — these are real test
+    assertions.
+
+    `min_records` — artifact must have at least this many records
+    `filled_pcts` — per-field, % of records that must have non-empty value
+    `max_failed_pct` — across an expansion run, max % of failed iterations
+    """
+
+    min_records: Optional[int] = None
+    filled_pcts: dict[str, float] = field(default_factory=dict)
+    max_failed_pct: Optional[float] = None
+
+
+@dataclass
+class HookDef:
+    """Hook that fires at a named lifecycle point during the walk.
+
+    `lifecycle_point`:
+      post_extract — after `_extract_from_scope` builds a record, before
+                     the record is emitted to its artifacts. Used to
+                     normalize / clean up captured data.
+
+    `config` is a dict of transforms applied in order:
+      rename=old:new
+      drop=field
+      strip_html=field
+      lowercase=field
+      default=field:value
+      regex=field:pattern:replacement
+    """
+
+    name: str
+    lifecycle_point: str  # post_extract (v1 supports this one)
+    config: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class Rule:
     """A named block of guards, actions, observations/assertions.
 
@@ -121,21 +235,41 @@ class Rule:
       - interrupt_override: replace the global dismiss-selectors for this rule
       - guard_policy: 'skip' (default) or 'abort' (raise to stop the whole walk)
       - options: 'timeout_ms', 'on_enter', 'on_fail' (the latter two: 'screenshot')
+
+    Capture pipeline (ported from WISE for the testing use case):
+      - field_specs: `Then I extract fields` declarations
+      - table_spec: `Then I extract table` declaration (one per rule)
+      - emit_targets: artifacts this rule pushes its extracted record into
+      - emit_flatten_by: {artifact_name: field_name} — flatten that array
+                        field into one record per element
+      - emit_merge_on: {artifact_name: key_field} — merge into existing
+                       artifact record matching this key
     """
 
     name: str
     parents: list[str] = field(default_factory=list)
-    items: list[Any] = field(default_factory=list)  # StateCheck | Action in declaration order
+    items: list[Any] = field(default_factory=list)  # StateCheck | Action | Emit in declaration order
     retry_max: int = 0
     retry_delay_ms: int = 1000
     interrupt_paused: bool = False
     interrupt_override: Optional[list[str]] = None  # None = inherit verification's list
     guard_policy: str = "skip"
     options: dict[str, str] = field(default_factory=dict)
+    # Capture pipeline (TIER 1 — artifact model)
+    field_specs: list[FieldSpec] = field(default_factory=list)
+    table_spec: Optional[TableSpec] = None
+    emit_targets: list[str] = field(default_factory=list)
+    emit_flatten_by: dict[str, str] = field(default_factory=dict)
+    emit_merge_on: dict[str, str] = field(default_factory=dict)
 
     @property
     def has_action(self) -> bool:
         return any(isinstance(it, Action) for it in self.items)
+
+    @property
+    def has_capture(self) -> bool:
+        """True if this rule extracts a record (fields or table)."""
+        return bool(self.field_specs) or self.table_spec is not None
 
 
 @dataclass
@@ -164,13 +298,6 @@ class InterruptConfig:
 
 
 @dataclass
-class Hook:
-    name: str
-    point: str  # before_scenario | after_scenario | before_rule | after_rule | on_failure
-    keyword_name: str = ""
-
-
-@dataclass
 class Verification:
     """The whole run — one per .robot suite."""
 
@@ -178,8 +305,14 @@ class Verification:
     scenarios: list[Scenario] = field(default_factory=list)
     state_setup: StateSetup = field(default_factory=StateSetup)
     interrupts: InterruptConfig = field(default_factory=InterruptConfig)
-    hooks: list[Hook] = field(default_factory=list)
+    hooks: list[HookDef] = field(default_factory=list)
+    # Artifact model — declared per-verification, scoped per-scenario at write time.
+    artifacts: dict[str, ArtifactSchema] = field(default_factory=dict)
+    artifact_store: dict[str, list] = field(default_factory=dict)
+    quality_gates: dict[str, QualityGate] = field(default_factory=dict)  # per-artifact
+    write_overrides: dict[str, str] = field(default_factory=dict)  # artifact_name -> path
     current_scenario: Optional[int] = None
+    current_artifact: Optional[str] = None  # most-recently-mentioned artifact (for QG attach)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +329,90 @@ def _parse_options(raw: tuple[str, ...]) -> dict[str, str]:
         k, _, v = item.partition("=")
         out[k.strip()] = v.strip().strip('"').strip("'")
     return out
+
+
+def _parse_field_specs(raw: tuple[str, ...]) -> list:
+    """Parse `field=N extractor=E locator=L attr=A ...` rows.
+
+    Same continuation-row grammar as WISE's `_parse_field_specs`. Each
+    `field=` starts a new FieldSpec; sibling `extractor=/locator=/attr=`
+    belong to the most recent `field=`. Robust to both 2+-space and
+    1-space arg separators.
+    """
+    tokens: list[str] = []
+    for spec in raw:
+        for tok in spec.split():
+            if tok:
+                tokens.append(tok)
+    fields: list = []
+    current: dict[str, str] = {}
+
+    def flush() -> None:
+        if current.get("field"):
+            fields.append(
+                FieldSpec(
+                    name=current["field"],
+                    extractor=current.get("extractor", "text"),
+                    locator=_strip_quotes(current.get("locator", "")),
+                    attr=_strip_quotes(current.get("attr", "")),
+                )
+            )
+
+    for tok in tokens:
+        if "=" not in tok:
+            continue
+        k, _, v = tok.partition("=")
+        k = k.strip()
+        if k == "field":
+            flush()
+            current = {"field": v.strip()}
+        else:
+            current[k] = v.strip()
+    flush()
+    return fields
+
+
+def _parse_table_specs(raw: tuple[str, ...]) -> tuple[int, list]:
+    """Parse `header_row=N field=X header=Y ...` rows.
+
+    Returns (header_row, list[TableFieldSpec]).
+    """
+    tokens: list[str] = []
+    for spec in raw:
+        for tok in spec.split():
+            if tok:
+                tokens.append(tok)
+    header_row = 0
+    fields: list = []
+    current: dict[str, str] = {}
+
+    def flush() -> None:
+        if current.get("field"):
+            fields.append(
+                TableFieldSpec(
+                    name=current["field"],
+                    header=_strip_quotes(current.get("header", current["field"])),
+                )
+            )
+
+    for tok in tokens:
+        if "=" not in tok:
+            continue
+        k, _, v = tok.partition("=")
+        k = k.strip()
+        if k == "header_row":
+            try:
+                header_row = int(v)
+            except (ValueError, TypeError):
+                pass
+            continue
+        if k == "field":
+            flush()
+            current = {"field": v.strip()}
+        else:
+            current[k] = v.strip()
+    flush()
+    return header_row, fields
 
 
 def _parse_emit_fields(raw: tuple[str, ...]) -> list:
@@ -566,7 +783,7 @@ class AITester:
 
     @keyword("And I emit \"${name}\"")
     def and_emit(self, name: str, *specs: str) -> None:
-        """Capture named fields from the page into emit.jsonl.
+        """Direct emit — ad-hoc capture, writes one record to emit.jsonl.
 
         Continuation rows (one per field):
           field=<name> source=<text|attr|count|html|value|class|
@@ -580,10 +797,241 @@ class AITester:
             ...    field=case_count    source=count    locator=".case-row"
             ...    field=first_title   source=text     locator=".case-row:first-child .title"
             ...    field=status        source=attr     locator="[data-testid=status]"  attr=data-state
+
+        For accumulating, schema-typed captures across multiple rules
+        with optional dedupe / flatten / merge / quality-gate assertions,
+        use the artifact pipeline instead (§ 4 Artifacts / Extract / Emit).
         """
         self._current_rule().items.append(
             Emit(name=_strip_quotes(name), fields=_parse_emit_fields(specs))
         )
+
+    # ------------------------------------------------------------------
+    # Artifact pipeline — capture structured records into named bags,
+    # accumulating across rules. Quality gates assert against the bag.
+    # ------------------------------------------------------------------
+
+    @keyword("Given I register artifact \"${artifact}\"")
+    def register_artifact(self, artifact: str, *fields: str) -> None:
+        """Declare an artifact bag with a typed schema.
+
+        Continuation rows (one per field):
+          field=<name> type=<string|number|url|array|boolean> required=<true|false>
+
+        The schema is documentary in v1 (the agent reads it to know what
+        to capture; the engine does not validate against it at emit time).
+
+        Example:
+            Given I register artifact "approved_cases"
+            ...    field=id         type=string  required=true
+            ...    field=status     type=string  required=true
+            ...    field=approver   type=string  required=false
+        """
+        name = _strip_quotes(artifact)
+        parsed: list[dict] = []
+        current: dict[str, str] = {}
+        for spec in fields:
+            for tok in spec.split():
+                if "=" not in tok:
+                    continue
+                k, _, v = tok.partition("=")
+                k = k.strip()
+                if k == "field" and current.get("field"):
+                    parsed.append(current.copy())
+                    current = {}
+                current[k] = v.strip()
+        if current.get("field"):
+            parsed.append(current.copy())
+        self._v.artifacts[name] = ArtifactSchema(name=name, fields=parsed)
+        self._v.artifact_store.setdefault(name, [])
+        self._v.current_artifact = name
+
+    @keyword("And I set artifact options for \"${artifact}\"")
+    def set_artifact_options(self, artifact: str, *options: str) -> None:
+        """Configure an already-registered artifact.
+
+        Options:
+          dedupe=<field>        # drop records where this field has been seen
+          description=<text>    # human prose for the diagnose aspect
+          output=<true|false>   # write to <output_dir>/<name>.jsonl at scenario teardown
+                                # (default true)
+
+        Example:
+            And I set artifact options for "approved_cases"
+            ...    dedupe=id
+            ...    description="One record per approved case visible in the dashboard"
+        """
+        name = _strip_quotes(artifact)
+        art = self._v.artifacts.get(name)
+        if not art:
+            return
+        kv = _parse_options(options)
+        if "dedupe" in kv:
+            art.dedupe = kv["dedupe"]
+        if "description" in kv:
+            art.description = kv["description"]
+        if "output" in kv:
+            art.output = kv["output"].lower() in ("true", "1", "yes")
+
+    @keyword("Then I extract fields")
+    def extract_fields(self, *specs: str) -> None:
+        """Declare the field-extraction spec for the current rule.
+
+        Continuation rows (one per field):
+          field=<name>
+          extractor=<text|attr|grouped|html|link|number|value|class>
+          locator=<css>
+          attr=<attr-name>   # required for extractor=attr
+
+        Walker runs this at the end of the rule body (after actions /
+        observation gates have passed) to build a record. The record is
+        then handed to any `emit to artifact` declared on the same rule.
+
+        Example:
+            Then I extract fields
+            ...    field=id      extractor=attr   locator="[data-testid=case-row]"  attr=data-case-id
+            ...    field=title   extractor=text   locator=".case-title"
+            ...    field=link    extractor=link   locator="a.detail"
+            ...    field=count   extractor=number locator=".items .badge"
+            And I emit to artifact "case_list"
+        """
+        self._current_rule().field_specs = _parse_field_specs(specs)
+
+    @keyword("Then I extract table \"${name}\" from \"${locator}\"")
+    def extract_table(self, name: str, locator: str, *specs: str) -> None:
+        """Capture a HTML table's rows as records into the named artifact.
+
+        Continuation rows:
+          header_row=<N>           # row index of headers (default 0)
+          field=<name> header=<header_text>
+
+        Each data row in the table becomes one record. The walker
+        matches `header_text` against the actual header texts at
+        `header_row` to find the column index for `field=<name>`.
+
+        Records are auto-flattened into the named artifact at scenario
+        teardown — no separate `emit to artifact` needed.
+
+        Example:
+            Then I extract table "case_summary" from "table[data-testid=summary]"
+            ...    header_row=0
+            ...    field=metric  header=Metric
+            ...    field=value   header=Today
+        """
+        header_row, fields = _parse_table_specs(specs)
+        self._current_rule().table_spec = TableSpec(
+            name=_strip_quotes(name),
+            locator=_strip_quotes(locator),
+            header_row=header_row,
+            fields=fields,
+        )
+        # Table auto-emits to its named artifact
+        rule = self._current_rule()
+        tname = _strip_quotes(name)
+        if tname not in rule.emit_targets:
+            rule.emit_targets.append(tname)
+        # Auto-register the artifact if not declared
+        self._v.artifacts.setdefault(tname, ArtifactSchema(name=tname))
+        self._v.artifact_store.setdefault(tname, [])
+
+    @keyword("And I emit to artifact \"${artifact}\"")
+    def emit_to_artifact(self, artifact: str) -> None:
+        """Push the rule's extracted record into the named artifact bag.
+
+        Use after `Then I extract fields` on the same rule. The walker
+        applies any `register hook at post_extract` transforms before
+        pushing.
+        """
+        name = _strip_quotes(artifact)
+        rule = self._current_rule()
+        if name not in rule.emit_targets:
+            rule.emit_targets.append(name)
+        self._v.artifacts.setdefault(name, ArtifactSchema(name=name))
+        self._v.artifact_store.setdefault(name, [])
+        self._v.current_artifact = name
+
+    @keyword("And I emit to artifact \"${artifact}\" flattened by \"${field}\"")
+    def emit_flattened(self, artifact: str, field: str) -> None:
+        """Push the rule's extracted record into the artifact, one record
+        per element of the named array field.
+
+        Use when an extractor returned a `grouped` array and you want
+        one record per element rather than one record containing the
+        array.
+
+        Example:
+            Then I extract fields
+            ...    field=tags  extractor=grouped  locator=".tag-chip"
+            And I emit to artifact "case_tags" flattened by "tags"
+        """
+        name = _strip_quotes(artifact)
+        rule = self._current_rule()
+        if name not in rule.emit_targets:
+            rule.emit_targets.append(name)
+        rule.emit_flatten_by[name] = _strip_quotes(field)
+        self._v.artifacts.setdefault(name, ArtifactSchema(name=name))
+        self._v.artifact_store.setdefault(name, [])
+        self._v.current_artifact = name
+
+    @keyword("And I merge into artifact \"${artifact}\" on key \"${key}\"")
+    def merge_into_artifact(self, artifact: str, key: str) -> None:
+        """Merge the rule's extracted record INTO an existing artifact
+        record matching this key field. New fields are added; existing
+        fields are overwritten.
+
+        Use for multi-rule capture: rule A emits base fields, rule B
+        emits additional fields, merge by id.
+
+        Example:
+            I define rule "case_basics"
+                Then I extract fields  field=id extractor=attr locator=. attr=data-id
+                ...                    field=title extractor=text locator=h3
+                And I emit to artifact "cases"
+            I define rule "case_owner"
+                And I declare parents "case_basics"
+                Then I extract fields  field=id extractor=attr locator=. attr=data-id
+                ...                    field=owner extractor=text locator=".owner"
+                And I merge into artifact "cases" on key "id"
+        """
+        name = _strip_quotes(artifact)
+        rule = self._current_rule()
+        if name not in rule.emit_targets:
+            rule.emit_targets.append(name)
+        rule.emit_merge_on[name] = _strip_quotes(key)
+        self._v.artifacts.setdefault(name, ArtifactSchema(name=name))
+        self._v.artifact_store.setdefault(name, [])
+        self._v.current_artifact = name
+
+    @keyword("And I set quality gate min records to ${count}")
+    def quality_gate_min_records(self, count: str) -> None:
+        """Assertion: the most-recently-mentioned artifact must contain
+        at least this many records at scenario teardown. Failure creates
+        a synthetic RuleResult that fails the scenario."""
+        if self._v.current_artifact:
+            qg = self._v.quality_gates.setdefault(
+                self._v.current_artifact, QualityGate()
+            )
+            qg.min_records = int(count)
+
+    @keyword("And I set filled percentage for \"${field}\" to ${percent}")
+    def quality_gate_filled_pct(self, field_: str, percent: str) -> None:
+        """Assertion: at least this percentage of records in the current
+        artifact must have non-empty values for the named field."""
+        if self._v.current_artifact:
+            qg = self._v.quality_gates.setdefault(
+                self._v.current_artifact, QualityGate()
+            )
+            qg.filled_pcts[_strip_quotes(field_)] = float(percent)
+
+    @keyword("And I set max failed percentage to ${percent}")
+    def quality_gate_max_failed_pct(self, percent: str) -> None:
+        """Assertion: across an expansion run, no more than this
+        percentage of iterations may fail."""
+        if self._v.current_artifact:
+            qg = self._v.quality_gates.setdefault(
+                self._v.current_artifact, QualityGate()
+            )
+            qg.max_failed_pct = float(percent)
 
     # ------------------------------------------------------------------
     # Actions — Navigation
@@ -728,9 +1176,43 @@ class AITester:
 
     @keyword("And I register hook \"${name}\" at \"${point}\"")
     def register_hook(self, name: str, point: str, *opts: str) -> None:
-        kv = _parse_options(opts)
+        """Register a lifecycle hook that transforms extracted records.
+
+        v1 supported lifecycle point: `post_extract` (fires after a rule
+        builds its record via `Then I extract fields` / `Then I extract
+        table`, before the record is emitted to its artifacts).
+
+        Continuation rows are key=value transforms applied in order:
+          rename=<old>:<new>             # rename a field
+          drop=<field>                   # remove a field
+          strip_html=<field>             # strip HTML tags
+          lowercase=<field>              # lowercase string field
+          default=<field>:<value>        # set default if field empty
+          regex=<field>:<pattern>:<replacement>  # regex replace
+
+        Example:
+            And I register hook "normalize" at "post_extract"
+            ...    rename=case_id:id
+            ...    drop=_internal_marker
+            ...    strip_html=description
+            ...    lowercase=status
+            ...    regex=link:^/:https://app.example.com/
+        """
+        # Flatten args, allow either strict (2+-space) or lenient
+        # (1-space) RF continuation-row separators.
+        cfg: dict[str, str] = {}
+        for spec in opts:
+            for tok in spec.split():
+                if "=" not in tok:
+                    continue
+                k, _, v = tok.partition("=")
+                cfg[k.strip()] = _strip_quotes(v.strip())
         self._v.hooks.append(
-            Hook(name=_strip_quotes(name), point=_strip_quotes(point), keyword_name=kv.get("keyword", ""))
+            HookDef(
+                name=_strip_quotes(name),
+                lifecycle_point=_strip_quotes(point),
+                config=cfg,
+            )
         )
 
     # ------------------------------------------------------------------
