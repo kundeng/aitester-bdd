@@ -665,7 +665,94 @@ agent-browser screenshot
 
 After each `snapshot`, note: the selectors you'll use, the data-testids you saw, the URL the SPA is now on, the text content of elements you'll assert against. Only THEN open the editor and write `suite.robot`.
 
-## 12 — When to file a bug report instead
+## 12 — Emit: intention-driven, never auto-dumped
+
+The walker has an **explicit emit** primitive — `And I emit "${name}"` —
+that captures structured page state into `<output_dir>/emit.jsonl` at
+the position of the step in the rule. **You** decide whether to write
+emit calls based on the story's intent. The walker does NOT auto-emit
+on failure; failure diagnosis is done by the AOP `diagnose` aspect (see
+§ 13), which writes natural-language explanations to `failures.jsonl`.
+
+### Intention → emit decision
+
+| Story type | Cues in the story | Explicit emit? |
+|------------|-------------------|-----------------|
+| **Smoke / regression** | "verify X works", "log in and see Y" | **no** — keep the suite fast and binary; rely on the diagnose aspect for failures |
+| **Diagnostic probe** | "what is on the page", "snapshot the dashboard's metrics", "capture the table" | **heavy** — emit the data the human will read |
+| **Differential / longitudinal** | "track how Y changes between runs", "produce a baseline" | **structured** — emit deterministic field names so diffs work |
+| **Bug-repro instrumentation** | "reproduce the bug where Y misbehaves when X", "capture state right before the broken step" | **targeted** — emit only around the suspected fault |
+
+### Syntax
+
+```robot
+And I emit "${name}"
+...    field=<name> source=<text|attr|count|html|value|class|is_visible|is_enabled|is_checked|js>
+...                 locator=<css>       # required for everything except js
+...                 attr=<attr>         # required for source=attr
+...                 expr=<js>           # required for source=js (free-form expression)
+```
+
+Each `field=...` starts a new field; sibling `source=/locator=/attr=/expr=`
+keys belong to the most recent `field=`. Multiple fields per emit
+statement is normal.
+
+### Example: diagnostic probe of a dashboard
+
+```robot
+I define rule "dashboard_loaded"
+    And I declare parents "login"
+    When I open "${BASE_URL}/dashboard"
+    And selector "[data-testid=dashboard-root]" exists
+    And I emit "dashboard_state"
+    ...    field=case_count    source=count    locator=".case-row"
+    ...    field=first_title   source=text     locator=".case-row:first-child .title"
+    ...    field=status         source=attr     locator="[data-testid=status]"  attr=data-state
+    ...    field=visible        source=is_visible  locator=".empty-state"
+```
+
+### Human-edit affordance
+
+The `.robot` is text. After authoring, the user may:
+- Add an emit row to a passing smoke test that's intermittently failing,
+  to debug the flake.
+- Remove emit rows from a diagnostic suite once it's stabilized into a
+  regression test.
+
+Either is normal. Don't over-emit at authoring time — each emit row
+costs one or more page queries.
+
+---
+
+## 13 — Failure diagnosis: an AOP aspect, not your concern
+
+When a rule fails, the walker's AOP `diagnose` aspect fires automatically:
+
+1. Hands the LLM (same `cc/claude-opus-4-7` backend by default) the
+   verification + scenario + rule + failed step + expected/observed +
+   the **full MDP trajectory** recorded by the `trajectory` aspect.
+2. Asks: "why did this rule likely fail? Is the cause in the SUT or
+   in the test?"
+3. Writes the answer to `RuleResult.ai_diagnosis` (shown in the
+   verdict output) AND appends a structured record to
+   `<output_dir>/failures.jsonl`.
+
+You do not need to instrument anything for this. The diagnose aspect is
+always on. Disable via `AITESTER_DISABLE_ASPECTS=diagnose` if running in
+a CI environment without an LLM endpoint.
+
+Persistence summary (all paths honor `AITESTER_EMIT_DIR`, falling back
+to RF's `${OUTPUT_DIR}` or cwd):
+
+| File | Written by | Purpose |
+|------|-----------|---------|
+| `emit.jsonl` | explicit `And I emit "..."` | structured page-state captures for diagnostic/probe suites |
+| `walk_log.jsonl` | `trajectory` aspect | every MDP transition (rule_enter, before/after_action, state_check, dismiss, emit, rule_exit) — full episode record |
+| `failures.jsonl` | `diagnose` aspect | one record per rule failure with the AI-written diagnosis + the deterministic failure context |
+
+---
+
+## 14 — When to file a bug report instead
 
 You write `triage/<story-slug>.md` (NOT a `.robot` suite) when any of these is true after a real exploration attempt:
 

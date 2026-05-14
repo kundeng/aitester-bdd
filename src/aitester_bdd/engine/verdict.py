@@ -19,6 +19,11 @@ class RuleResult:
     observed: str = ""
     expected: str = ""
     screenshot: str | None = None
+    # AI-written diagnosis of the failure (cross-cutting aspect — when a
+    # rule fails the walker hands story + rule + expected + observed +
+    # page snapshot to the LLM and asks "why did this fail?"). Empty
+    # when AI diagnosis is disabled or unconfigured.
+    ai_diagnosis: str = ""
     duration_ms: float = 0.0
 
 
@@ -66,4 +71,6 @@ class Verdict:
                 parts.append(f"      step:     {r.failure_step_repr}")
             if r.screenshot:
                 parts.append(f"      screenshot: {r.screenshot}")
+            if r.ai_diagnosis:
+                parts.append(f"      diagnosis: {r.ai_diagnosis}")
         return "\n".join(parts)

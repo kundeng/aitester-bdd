@@ -83,6 +83,28 @@ criterion, FAIL it. Do not speculate about state you cannot see.
 Reply with EXACTLY one word: PASS or FAIL.
 """
 
+SYSTEM_PROMPT_DIAGNOSE = """You are aitester-bdd's failure-diagnosis aspect.
+
+A rule in a test suite just failed. You receive:
+  - the verification + scenario + rule name (what the test intends)
+  - the failed step (selector, kind, position)
+  - what the test expected
+  - what was actually observed
+  - a snapshot of the page at the moment of failure (URL + visible text)
+
+Write a SHORT (1-3 sentence) diagnosis that:
+  1. Names the most likely cause grounded in the snapshot (e.g.,
+     "the page returned a 500 error", "the auth banner is still
+     visible suggesting login did not complete", "the locator picks
+     up the loading skeleton rather than the loaded element").
+  2. If the cause is in the SYSTEM under test, say so. If the cause
+     is in the TEST itself (wrong selector, race, stale expectation),
+     say that.
+
+Do NOT speculate beyond the snapshot. Do NOT propose code fixes. Just
+state the cause and where it lives (SUT vs test).
+"""
+
 
 DEFAULT_MODEL = "openai/cc/claude-opus-4-7"
 DEFAULT_BASE_URL = "http://localhost:20128/v1"
@@ -109,14 +131,20 @@ class AIAgentLLM:
         _ensure_proxy_env()
 
     def _completion(self, messages: list[dict], *, max_tokens: int = 2048) -> str:
-        """Single litellm completion call. Returns the assistant text."""
+        """Single litellm completion call. Returns the assistant text.
+
+        opus-4.7 rejects `temperature` as deprecated. Setting it to None
+        (not omitting it!) is what litellm respects — its default would
+        otherwise inject a value. `drop_params=True` is belt-and-suspenders
+        for other unsupported params per provider."""
         import litellm
 
         resp = litellm.completion(
             model=self.model,
             messages=messages,
-            temperature=0.2,
             max_tokens=max_tokens,
+            temperature=None,
+            drop_params=True,
         )
         return resp.choices[0].message.content or ""
 
@@ -182,6 +210,21 @@ class AIAgentLLM:
         )
         out = self._chat(SYSTEM_PROMPT_JUDGE, user, max_tokens=8).strip().upper()
         return out.startswith("PASS")
+
+    def diagnose(self, *, context: str) -> str:
+        """AOP aspect: explain why a rule failed.
+
+        `context` is a structured plain-text block carrying the verification
+        name, scenario, rule, failed step, expected/observed, and a page
+        snapshot. Returns 1-3 sentences naming the likely cause and where
+        it lives (SUT vs test). Empty string on any error so the walker
+        can still report the deterministic failure cleanly."""
+        try:
+            out = self._chat(SYSTEM_PROMPT_DIAGNOSE, context, max_tokens=300)
+            return out.strip()
+        except Exception as exc:
+            log.warning("diagnose call failed: %s", exc)
+            return ""
 
     def judge_visual(self, *, criterion: str, png_bytes: bytes) -> bool:
         """Multimodal judge over a screenshot. Returns True if the screenshot

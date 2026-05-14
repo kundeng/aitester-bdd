@@ -56,3 +56,9 @@ class LLMClient(Protocol):
         """True if the screenshot satisfies the criterion. Used by the
         walker's `visual_semantic` StateCheck."""
         ...
+
+    def diagnose(self, *, context: str) -> str:
+        """AOP failure aspect: hand the failure context to the LLM, get
+        a short natural-language explanation. The walker calls this on
+        every rule failure. Empty return = no diagnosis available."""
+        ...

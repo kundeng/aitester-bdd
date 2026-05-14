@@ -467,9 +467,9 @@ def _effective_interrupt_selectors(
 def _dismiss_interrupts(browser: BrowserAdapter, selectors: list[str]) -> None:
     """Click any visible interrupt selectors (cookie banners, modals).
 
-    Ported from WISE. Called before guards and before every action.
-    Each selector is tried once per call — if a modal pops up mid-action,
-    the action handler's retry path will call this again.
+    Ported from WISE. Kept as a free function for tests that monkeypatch
+    it directly. The walker's own dismiss calls are inlined in
+    `_execute_body._dismiss` so they can fire `after_dismiss` aspects.
     """
     for sel in selectors:
         try:
@@ -487,21 +487,29 @@ def _dismiss_interrupts(browser: BrowserAdapter, selectors: list[str]) -> None:
 def _split_rule_items(rule: "Rule") -> tuple[list["StateCheck"], list]:
     """Split the rule's items into (guards, body).
 
-    Guards = StateChecks before the first Action.
+    Guards = StateChecks before the first Action (no Emit, no Action).
     Body   = everything from the first Action onward (Actions + inline
-             StateChecks that act as observation gates / assertions).
+             StateChecks that act as observation gates / assertions +
+             Emit observations that capture but do not gate).
+
+    Emit items before any Action are still treated as body items (they
+    are observations, not guards; they would be useless as guards since
+    they don't gate anything).
     """
-    from aitester_bdd.AITester import Action, StateCheck
+    from aitester_bdd.AITester import Action, Emit, StateCheck
 
     guards: list[StateCheck] = []
     body: list = []
-    saw_action = False
+    saw_action_or_emit = False
     for it in rule.items:
-        if saw_action:
+        if saw_action_or_emit:
             body.append(it)
             continue
         if isinstance(it, Action):
-            saw_action = True
+            saw_action_or_emit = True
+            body.append(it)
+        elif isinstance(it, Emit):
+            saw_action_or_emit = True
             body.append(it)
         elif isinstance(it, StateCheck):
             guards.append(it)
@@ -519,16 +527,31 @@ def _check_guards(
     rule: "Rule",
     verification: "Verification",
     guards: list["StateCheck"],
+    *,
+    registry: Any = None,
 ) -> tuple[bool, Optional["StateCheck"], str, str]:
     """Evaluate all guards. Returns (passed, failed_check_or_None, expected, observed).
 
     Dismisses interrupts once before checking. Each guard uses the short
     guard timeout (no significant waiting — guards are 'is the world already
-    in the right state?').
+    in the right state?'). Fires `after_state_check` per guard.
     """
-    _dismiss_interrupts(browser, _effective_interrupt_selectors(rule, verification))
+    sels = _effective_interrupt_selectors(rule, verification)
+    for sel in sels:
+        try:
+            if browser.get_count(sel) > 0:
+                browser.click(sel)
+                log.info("Dismissed interrupt: %s", sel)
+                if registry is not None:
+                    registry.fire_after_dismiss(rule, sel)
+        except Exception:
+            pass
     for g in guards:
         ok, expected, observed = _eval_state_check(browser, g, timeout_ms=DEFAULT_GUARD_TIMEOUT_MS)
+        if registry is not None:
+            registry.fire_after_state_check(
+                rule, g, ok, expected, observed, position="guard",
+            )
         if not ok:
             return (False, g, expected, observed)
     return (True, None, "", "")
@@ -545,6 +568,8 @@ def _execute_body(
     body: list,
     *,
     deadline: Optional[float] = None,
+    scenario_name: str = "",
+    registry: Any = None,
 ) -> tuple[bool, str, str, Optional["StateCheck | Action"], str, str]:
     """Execute the rule body — actions interleaved with inline state checks.
 
@@ -553,14 +578,30 @@ def _execute_body(
 
     Post-action StateChecks are observations/assertions: failing them
     FAILS the rule with structured evidence (testing-specific; WISE only
-    warned).
+    warned). Emit items are observations only — they capture page state
+    into emit.jsonl and never fail the rule.
 
     Actions: dismiss interrupts → run action → on raise, dismiss + retry
     once. Honors `await=<selector>` option after each action.
+
+    Aspects fire at every transition (`before_action`, `after_action`,
+    `after_state_check`, `after_emit`, `after_dismiss`).
     """
-    from aitester_bdd.AITester import Action, StateCheck
+    from aitester_bdd.AITester import Action, Emit, StateCheck
+    from aitester_bdd.engine.emit import _build_data, emit_explicit
 
     interrupt_sels = _effective_interrupt_selectors(rule, verification)
+
+    def _dismiss(b, sels):
+        for sel in sels:
+            try:
+                if b.get_count(sel) > 0:
+                    b.click(sel)
+                    log.info("Dismissed interrupt: %s", sel)
+                    if registry is not None:
+                        registry.fire_after_dismiss(rule, sel)
+            except Exception:
+                pass
 
     for step in body:
         if deadline is not None and time.time() > deadline:
@@ -568,11 +609,32 @@ def _execute_body(
                     f"per-rule timeout exceeded ({rule.options.get('timeout_ms')}ms)",
                     step, "", "")
 
+        if isinstance(step, Emit):
+            # Observation only — never fails the rule. Capture even if
+            # underlying queries error out; failures land as None/0 in
+            # the emit record, not as test failures.
+            try:
+                emit_explicit(
+                    browser, scenario=scenario_name, rule=rule.name, emit_obj=step,
+                )
+                if registry is not None:
+                    # Re-run capture lightly for the aspect — keeps WalkLog
+                    # in sync with what landed in emit.jsonl.
+                    data = _build_data(browser, step.fields)
+                    registry.fire_after_emit(rule, step, data)
+            except Exception as exc:
+                log.warning("emit %r failed to write: %s", step.name, exc)
+            continue
+
         if isinstance(step, StateCheck):
             # Inline observation gate / post-action assertion.
             ok, expected, observed = _eval_state_check(
                 browser, step, timeout_ms=DEFAULT_OBSERVATION_TIMEOUT_MS
             )
+            if registry is not None:
+                registry.fire_after_state_check(
+                    rule, step, ok, expected, observed, position="observation",
+                )
             if not ok:
                 return (
                     False, "observation_or_assertion",
@@ -587,27 +649,40 @@ def _execute_body(
         # Dismiss interrupts before every action — modals can appear at
         # any moment and block clicks. (Ported from WISE.)
         if interrupt_sels:
-            _dismiss_interrupts(browser, interrupt_sels)
+            _dismiss(browser, interrupt_sels)
 
+        if registry is not None:
+            registry.fire_before_action(rule, step)
+
+        t0 = time.time()
+        raised = False
         try:
             _eval_action(browser, step)
             _await_after_action(browser, step)
         except Exception as exc_first:
-            # Recovery: a popup may have appeared between the dismiss
-            # and the action. Dismiss + retry once. (Ported from WISE.)
+            raised = True
+            # Recovery: dismiss + retry once.
             if interrupt_sels:
-                _dismiss_interrupts(browser, interrupt_sels)
+                _dismiss(browser, interrupt_sels)
                 try:
                     _eval_action(browser, step)
                     _await_after_action(browser, step)
+                    if registry is not None:
+                        registry.fire_after_action(rule, step, time.time() - t0, raised)
                     continue
                 except Exception as exc_retry:
+                    if registry is not None:
+                        registry.fire_after_action(rule, step, time.time() - t0, True)
                     return (False, "action",
                             f"action raised twice: {type(exc_retry).__name__}: {exc_retry}",
                             step, "", "")
+            if registry is not None:
+                registry.fire_after_action(rule, step, time.time() - t0, raised)
             return (False, "action",
                     f"action raised: {type(exc_first).__name__}: {exc_first}",
                     step, "", "")
+        if registry is not None:
+            registry.fire_after_action(rule, step, time.time() - t0, raised)
 
     return (True, "", "", None, "", "")
 
@@ -624,8 +699,10 @@ def _walk_rule(
     *,
     already_passed: set[str],
     run_deadline: Optional[float] = None,
+    registry: Any = None,
+    walk_log: Any = None,
 ) -> RuleResult:
-    """Walk one rule with full WISE semantics ported."""
+    """Walk one rule with full WISE semantics + aspect hooks."""
     from aitester_bdd.AITester import Action, StateCheck
 
     start = time.time()
@@ -649,6 +726,15 @@ def _walk_rule(
                 duration_ms=(time.time() - start) * 1000,
             )
 
+    # before_rule aspect — also gives aspects a chance to skip the rule.
+    if registry is not None:
+        if registry.fire_before_rule(verification, scenario, rule, already_passed):
+            return RuleResult(
+                rule_name=rule.name, scenario_name=scenario.name, passed=True,
+                failure_message="skipped by aspect",
+                duration_ms=(time.time() - start) * 1000,
+            )
+
     # on_enter hook
     if rule.options.get("on_enter") == "screenshot":
         try:
@@ -667,19 +753,28 @@ def _walk_rule(
 
     # ── Guards (with retry-redo, ported from WISE) ────────────────────
     ok, failed_guard, expected, observed = _check_guards(
-        browser, rule, verification, guards
+        browser, rule, verification, guards, registry=registry,
     )
     if not ok and rule.retry_max > 0:
         for attempt in range(1, rule.retry_max + 1):
             log.info("Retry %d/%d for rule %r (guard %r failed)",
                      attempt, rule.retry_max, rule.name,
                      failed_guard.kind if failed_guard else "?")
+            if walk_log is not None:
+                walk_log.record(
+                    "retry", rule=rule.name, attempt=attempt,
+                    reason=f"guard {failed_guard.kind if failed_guard else '?'} failed",
+                )
             time.sleep(rule.retry_delay_ms / 1000.0)
             # Replay the body before re-checking guards (WISE semantics —
             # actions may bring the world into the guarded state).
-            _execute_body(browser, rule, verification, body, deadline=rule_deadline)
+            _execute_body(
+                browser, rule, verification, body,
+                deadline=rule_deadline, scenario_name=scenario.name,
+                registry=registry,
+            )
             ok, failed_guard, expected, observed = _check_guards(
-                browser, rule, verification, guards
+                browser, rule, verification, guards, registry=registry,
             )
             if ok:
                 break
@@ -692,21 +787,34 @@ def _walk_rule(
                 pass
         if rule.guard_policy == "abort":
             raise RuntimeError(f"Guard failed (abort policy) for rule {rule.name!r}")
-        return RuleResult(
+        repr_str = (
+            f"{failed_guard.kind} {failed_guard.locator or failed_guard.expected}"
+            if failed_guard else ""
+        )
+        diagnosis = ""
+        if registry is not None:
+            diagnosis = registry.fire_on_rule_failure(
+                verification, scenario, rule,
+                "guard", repr_str, expected, observed, failed_guard, walk_log,
+            )
+        result = RuleResult(
             rule_name=rule.name, scenario_name=scenario.name, passed=False,
             failure_step_kind="guard",
-            failure_step_repr=(
-                f"{failed_guard.kind} {failed_guard.locator or failed_guard.expected}"
-                if failed_guard else ""
-            ),
+            failure_step_repr=repr_str,
             failure_message="pre-action guard failed; rule skipped",
             expected=expected, observed=observed,
+            ai_diagnosis=diagnosis,
             duration_ms=(time.time() - start) * 1000,
         )
+        if registry is not None:
+            registry.fire_after_rule(verification, scenario, rule, result)
+        return result
 
     # ── Body (actions + inline observations/assertions) ───────────────
     passed, fk, fmsg, fitem, fexp, fobs = _execute_body(
-        browser, rule, verification, body, deadline=rule_deadline
+        browser, rule, verification, body,
+        deadline=rule_deadline, scenario_name=scenario.name,
+        registry=registry,
     )
 
     if not passed:
@@ -721,25 +829,46 @@ def _walk_rule(
             repr_str = f"{fitem.kind} {fitem.locator or fitem.expected}"
         elif isinstance(fitem, Action):
             repr_str = f"{fitem.kind} {fitem.target}"
-        return RuleResult(
+        diagnosis = ""
+        if registry is not None:
+            diagnosis = registry.fire_on_rule_failure(
+                verification, scenario, rule,
+                fk, repr_str, fexp, fobs, fitem, walk_log,
+            )
+        result = RuleResult(
             rule_name=rule.name, scenario_name=scenario.name, passed=False,
             failure_step_kind=fk,
             failure_step_repr=repr_str,
             failure_message=fmsg,
             expected=fexp, observed=fobs,
             screenshot=shot,
+            ai_diagnosis=diagnosis,
             duration_ms=(time.time() - start) * 1000,
         )
+        if registry is not None:
+            registry.fire_after_rule(verification, scenario, rule, result)
+        return result
 
-    return RuleResult(
+    result = RuleResult(
         rule_name=rule.name, scenario_name=scenario.name, passed=True,
         duration_ms=(time.time() - start) * 1000,
     )
+    if registry is not None:
+        registry.fire_after_rule(verification, scenario, rule, result)
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# AOP — failure / trajectory / instrumentation aspects live in
+# engine/aspects.py and engine/walk_log.py. The walker fires hooks via
+# the AspectRegistry it carries. See _build_default_registry() below
+# for the standard wiring.
+# ---------------------------------------------------------------------------
+
 
 def _run_state_setup(browser: BrowserAdapter, verification: "Verification") -> None:
     """Execute suite-level state setup (auth, consent) before any scenario.
@@ -783,17 +912,60 @@ def _run_state_setup(browser: BrowserAdapter, verification: "Verification") -> N
     browser.wait_for_load_state("networkidle", timeout="10s")
 
 
+def _build_default_registry(walk_log: Any):
+    """Wire up the standard aspects: trajectory recording, AI failure
+    diagnosis, slow-action instrumentation. Override by setting
+    AITESTER_DISABLE_ASPECTS=trajectory,diagnose,instrument (csv)."""
+    import os
+    from aitester_bdd.engine.aspects import AspectRegistry
+    from aitester_bdd.engine.walk_log import (
+        make_diagnose_aspect, make_instrument_aspect, make_trajectory_aspect,
+    )
+    from aitester_bdd.engine.emit import _output_dir
+
+    disabled = set(
+        a.strip() for a in os.environ.get("AITESTER_DISABLE_ASPECTS", "").split(",") if a.strip()
+    )
+    registry = AspectRegistry()
+    if "trajectory" not in disabled:
+        registry.register(make_trajectory_aspect(walk_log))
+    if "instrument" not in disabled:
+        registry.register(make_instrument_aspect())
+    if "diagnose" not in disabled:
+        registry.register(
+            make_diagnose_aspect(
+                get_llm=_get_llm,
+                output_dir_fn=_output_dir,
+                get_story=lambda v: getattr(v, "story", "") or "",
+            )
+        )
+    return registry
+
+
 def walk_verification(verification: "Verification") -> Verdict:
     """Walk all scenarios in a Verification; return a Verdict.
 
     Global run timeout via AITESTER_RUN_TIMEOUT (seconds, default 300).
     Browser session is opened once and torn down at the end (assumes one
     .robot suite per process).
+
+    Aspects wired by default:
+      - trajectory: records every MDP transition into walk_log.jsonl
+      - instrument: WARNs when a single action exceeds 0.5s
+      - diagnose: on every rule failure, asks the LLM "why?" and stores
+        the answer on RuleResult.ai_diagnosis + appends failures.jsonl
+
+    Disable any combination via AITESTER_DISABLE_ASPECTS=trajectory,...
     """
     import os
+    from aitester_bdd.engine.emit import _output_dir
+    from aitester_bdd.engine.walk_log import WalkLog
 
     run_timeout_s = int(os.environ.get("AITESTER_RUN_TIMEOUT", str(DEFAULT_RUN_TIMEOUT_S)))
     run_deadline = time.time() + run_timeout_s if run_timeout_s else None
+
+    walk_log = WalkLog(sink_path=_output_dir() / "walk_log.jsonl")
+    registry = _build_default_registry(walk_log)
 
     verdict = Verdict(verification_name=verification.name)
     browser = BrowserAdapter()
@@ -803,14 +975,24 @@ def walk_verification(verification: "Verification") -> Verdict:
         # scenario. Ported from WISE.
         _run_state_setup(browser, verification)
         for sc in verification.scenarios:
+            if registry.fire_before_scenario(verification, sc):
+                continue
+
             if sc.entry_url:
                 browser.open(sc.entry_url)
                 browser.wait_for_load_state("domcontentloaded", timeout="10s")
                 # Dismiss interrupts after initial load too
-                _dismiss_interrupts(browser, verification.interrupts.dismiss_selectors)
+                for sel in verification.interrupts.dismiss_selectors:
+                    try:
+                        if browser.get_count(sel) > 0:
+                            browser.click(sel)
+                            registry.fire_after_dismiss(None, sel)
+                    except Exception:
+                        pass
 
             order = _topo_sort(sc.rules)
             already_passed: set[str] = set()
+            scenario_passed = True
             for rname in order:
                 rule = sc.rules.get(rname)
                 if rule is None:
@@ -821,15 +1003,22 @@ def walk_verification(verification: "Verification") -> Verdict:
                             failure_message=f"undefined parent rule {rname!r}",
                         )
                     )
+                    scenario_passed = False
                     continue
                 result = _walk_rule(
                     browser, sc, rule, verification,
                     already_passed=already_passed,
                     run_deadline=run_deadline,
+                    registry=registry, walk_log=walk_log,
                 )
                 verdict.results.append(result)
                 if result.passed:
                     already_passed.add(rname)
+                else:
+                    scenario_passed = False
+
+            registry.fire_after_scenario(verification, sc, scenario_passed)
     finally:
         browser.close()
+        walk_log.close()
     return verdict

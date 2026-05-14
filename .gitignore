@@ -60,3 +60,6 @@ output/
 debug/
 *.local.yaml
 .env
+failures.jsonl
+walk_log.jsonl
+emit.jsonl

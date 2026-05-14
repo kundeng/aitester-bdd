@@ -76,6 +76,36 @@ class Action:
 
 
 @dataclass
+class EmitField:
+    """One field captured by an Emit step.
+
+    source = text|attr|count|html|value|class|is_visible|is_enabled|is_checked|js
+    locator is the CSS selector for everything except `js` (which uses `expr`).
+    attr is only required for source=attr.
+    """
+
+    name: str
+    source: str
+    locator: str = ""
+    attr: str = ""
+    expr: str = ""
+
+
+@dataclass
+class Emit:
+    """Capture structured page state without changing it.
+
+    Walker never fails the rule on an Emit (it's an observation, not an
+    assertion). Each Emit's data lands in `<output_dir>/emit.jsonl` with
+    `trigger=explicit`. The walker also writes `trigger=on_failure`
+    records automatically when a rule fails.
+    """
+
+    name: str
+    fields: list[EmitField] = field(default_factory=list)
+
+
+@dataclass
 class Rule:
     """A named block of guards, actions, observations/assertions.
 
@@ -166,6 +196,54 @@ def _parse_options(raw: tuple[str, ...]) -> dict[str, str]:
         k, _, v = item.partition("=")
         out[k.strip()] = v.strip().strip('"').strip("'")
     return out
+
+
+def _parse_emit_fields(raw: tuple[str, ...]) -> list:
+    """Parse `field=N source=S locator=L attr=A expr=E ...` rows.
+
+    Each `field=` starts a new EmitField. Following `source=/locator=/
+    attr=/expr=` keys belong to the most recent `field=`. Mirrors WISE's
+    `_parse_field_specs` shape so the agent's grammar is familiar.
+
+    Robust to either spacing: if RF gives us each k=v as a separate arg
+    (2+ spaces between, the strict-RF case) OR if multiple k=v pairs
+    arrive in a single arg (1-space separator, the lenient case), both
+    work. Tokens are re-split on whitespace before key parsing.
+    """
+    # Flatten: split any space-glued args into their constituent k=v tokens.
+    tokens: list[str] = []
+    for spec in raw:
+        for tok in spec.split():
+            if tok:
+                tokens.append(tok)
+
+    fields: list = []
+    current: dict[str, str] = {}
+
+    def flush() -> None:
+        if current.get("field"):
+            fields.append(
+                EmitField(
+                    name=current["field"],
+                    source=current.get("source", "text"),
+                    locator=_strip_quotes(current.get("locator", "")),
+                    attr=_strip_quotes(current.get("attr", "")),
+                    expr=current.get("expr", ""),
+                )
+            )
+
+    for tok in tokens:
+        if "=" not in tok:
+            continue
+        k, _, v = tok.partition("=")
+        k = k.strip()
+        if k == "field":
+            flush()
+            current = {"field": v.strip()}
+        else:
+            current[k] = v.strip()
+    flush()
+    return fields
 
 
 def _strip_quotes(s: str) -> str:
@@ -475,6 +553,36 @@ class AITester:
         (visual layout, chart shape, image content, etc.)."""
         self._current_rule().items.append(
             StateCheck("visual_semantic", expected=_strip_quotes(prompt))
+        )
+
+    # ------------------------------------------------------------------
+    # Emit — capture structured page state to <output_dir>/emit.jsonl
+    #
+    # Observation only — never fails the rule. Use when the test's
+    # intention goes beyond pass/fail (diagnostic probe, differential
+    # baseline, bug-repro instrumentation). See SKILL § "Emit" for the
+    # decision tree.
+    # ------------------------------------------------------------------
+
+    @keyword("And I emit \"${name}\"")
+    def and_emit(self, name: str, *specs: str) -> None:
+        """Capture named fields from the page into emit.jsonl.
+
+        Continuation rows (one per field):
+          field=<name> source=<text|attr|count|html|value|class|
+                              is_visible|is_enabled|is_checked|js>
+          locator=<css>     # required for everything except js
+          attr=<attr>       # required for source=attr
+          expr=<js>         # required for source=js (free-form expression)
+
+        Example:
+            And I emit "dashboard_state"
+            ...    field=case_count    source=count    locator=".case-row"
+            ...    field=first_title   source=text     locator=".case-row:first-child .title"
+            ...    field=status        source=attr     locator="[data-testid=status]"  attr=data-state
+        """
+        self._current_rule().items.append(
+            Emit(name=_strip_quotes(name), fields=_parse_emit_fields(specs))
         )
 
     # ------------------------------------------------------------------
