@@ -1,5 +1,17 @@
 """Browser adapter — minimal surface the walker drives.
 
+Two backends share the same surface:
+
+  * `_PlaywrightBackend` (default) — wraps `robotframework-browser`
+    (Playwright via RF). Needs `rfbrowser init` once.
+  * `NodriverBackend` (opt-in) — raw CDP via Edge/Chrome. No Playwright
+    fingerprint (defeats DataDome/Cloudflare-style detection), and no
+    `rfbrowser init` step. Lives in `nodriver_backend.py`. Pulled in
+    by setting `AITESTER_BROWSER=nodriver` and installing the
+    `aitester-bdd[stealth]` extra.
+
+Pick via env: `AITESTER_BROWSER=playwright` (default) or `nodriver`.
+
 Backs onto `robotframework-browser` (Playwright via RF) when running inside
 Robot Framework. Falls back to a NullBrowser stub when RF-Browser is
 unimportable (unit tests).
@@ -57,8 +69,28 @@ class _NullBrowser:
         return noop
 
 
-class BrowserAdapter:
-    """Minimal browser-driving surface.
+def BrowserAdapter():
+    """Factory — returns the configured backend.
+
+    `AITESTER_BROWSER=nodriver` → NodriverBackend (raw CDP via Chrome/Edge,
+    bot-detection-resistant, no rfbrowser init needed).
+
+    Otherwise → _PlaywrightBackend (rfbrowser/Playwright, the default).
+
+    Either way the returned object exposes the same public surface, so the
+    walker is backend-agnostic.
+    """
+    import os
+
+    choice = os.environ.get("AITESTER_BROWSER", "playwright").strip().lower()
+    if choice == "nodriver":
+        from aitester_bdd.engine.nodriver_backend import NodriverBackend
+        return NodriverBackend()
+    return _PlaywrightBackend()
+
+
+class _PlaywrightBackend:
+    """robotframework-browser / Playwright backend.
 
     Wraps the RF-Browser library if available (the RF-native path), falls
     back to a NullBrowser stub for unit testing. All gotcha-fix logic lives

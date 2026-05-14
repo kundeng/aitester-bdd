@@ -1,7 +1,6 @@
 *** Settings ***
 Documentation     Smoke test: login + open a case + verify it renders
 ...               Run against: make dev (http://localhost:5173 / :5175)
-Library           Browser
 Library           aitester_bdd.AITester
 Suite Setup       Given I start verification "${DEPLOYMENT}"
 Suite Teardown    Then I finalize verification

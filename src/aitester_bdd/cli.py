@@ -73,6 +73,24 @@ def author(
         raise typer.Exit(code=1)
 
 
+@app.command(name="init-browser")
+def init_browser() -> None:
+    """Run `rfbrowser init` — downloads Playwright + Chromium/Firefox/WebKit
+    into robotframework-browser's wrapper directory.
+
+    Required once per install before `aitester run <suite>` will work.
+    Authoring (Explore phase) does NOT need this — it uses the separate
+    `agent-browser` CLI.
+    """
+    typer.echo("Running `rfbrowser init` — this may take a few minutes (downloads ~300MB of browsers)...")
+    rc = subprocess.run([sys.executable, "-m", "Browser.entry", "init"]).returncode
+    if rc == 0:
+        typer.echo("✓ rfbrowser init complete. `aitester doctor` should now show initialized.")
+    else:
+        typer.echo(f"✗ rfbrowser init failed with exit code {rc}")
+    raise typer.Exit(code=rc)
+
+
 @app.command()
 def run(
     suite: str = typer.Argument(..., help="Path to a .robot suite"),
@@ -96,11 +114,41 @@ def doctor() -> None:
         typer.echo(f"  ✓ robotframework {robot.__version__}")
     except Exception as e:
         typer.echo(f"  ✗ robotframework: {e}")
+    chosen = os.environ.get("AITESTER_BROWSER", "playwright").lower()
+    typer.echo(f"  ℹ AITESTER_BROWSER={chosen} (default: playwright)")
+
+    # Playwright backend status
     try:
         import Browser  # type: ignore[import-not-found]
-        typer.echo(f"  ✓ robotframework-browser {getattr(Browser, '__version__', '?')}")
+        ver = getattr(Browser, '__version__', '?')
+        wrapper_dir = Path(Browser.__file__).parent / "wrapper"
+        node_modules = wrapper_dir / "node_modules"
+        if node_modules.is_dir():
+            typer.echo(f"  ✓ playwright backend: rfbrowser {ver} (initialized)")
+        else:
+            tag = "⚠" if chosen == "playwright" else "ℹ"
+            typer.echo(
+                f"  {tag} playwright backend: rfbrowser {ver} installed but NOT initialized"
+                f" — run `aitester init-browser` (only needed if AITESTER_BROWSER=playwright)"
+            )
     except Exception as e:
-        typer.echo(f"  ✗ robotframework-browser: {e} (run `rfbrowser init` after install)")
+        typer.echo(f"  ✗ playwright backend (rfbrowser): {e}")
+
+    # Nodriver backend status
+    try:
+        import nodriver  # type: ignore[import-not-found]  # noqa: F401
+        from aitester_bdd.engine.nodriver_backend import _find_browser_binary
+        binary = _find_browser_binary()
+        if binary:
+            typer.echo(f"  ✓ nodriver backend: installed, Chrome/Edge at {binary}")
+        else:
+            typer.echo("  ⚠ nodriver backend: installed but no Chrome/Edge found on system")
+    except ImportError:
+        tag = "⚠" if chosen == "nodriver" else "ℹ"
+        typer.echo(
+            f"  {tag} nodriver backend: not installed"
+            f" (install with `pip install aitester-bdd[stealth]` for bot-detected sites)"
+        )
     try:
         import importlib.metadata
         for pkg in ("deepagents", "langgraph", "langchain", "langchain-openai", "litellm"):

@@ -35,12 +35,31 @@ Do not use when: there's no live target to drive (no URL); the user is hand-writ
 
 | Phase | What you do | Tool |
 |-------|-------------|------|
-| Orient | Confirm env: RF, rfbrowser, agent-browser, LLM config | `aitester doctor` |
+| Orient | Confirm env: RF, rfbrowser, agent-browser, LLM config. If rfbrowser is installed but NOT initialized, run `aitester init-browser` once. | `aitester doctor` |
 | Explore | Drive the **live target** via `agent-browser`. Log in if needed, navigate the actual pages of the story, take snapshots at each step. Record selectors you can prove exist. | `agent-browser open / snapshot / click / type / ...` |
 | Author | Write `suite.robot` using ONLY the keywords in § 4. Every selector must come from a snapshot you took during Explore. | Edit / Write |
 | Review | `robot --dryrun` must pass cleanly. Fix any unknown-keyword / arg-shape errors. | `robot --dryrun suite.robot` |
 | Refine | If a real run fails, re-explore the failing step, patch the suite. | `agent-browser` + edit |
 | Ship | Hand `suite.robot` to the user. They run `robot suite.robot` without you. | — |
+
+### Two distinct browsers in the stack — don't confuse them
+
+**Explore (authoring time)**: the `agent-browser` CLI. Ships with its own
+browser, no init step. You drive it. Independent of the test execution
+backend.
+
+**Test execution (running the authored suite)**: you pick at runtime
+via `AITESTER_BROWSER` env var. Two backends, same authored `.robot`:
+
+| Backend | When | Setup needed |
+|---------|------|--------------|
+| `playwright` (default) | Most internal apps | `aitester init-browser` once (downloads Playwright browsers) |
+| `nodriver` | Sites with bot detection (DataDome, Cloudflare BM, etc.) **or** when you want to skip the Playwright install entirely | `pip install aitester-bdd[stealth]` and have Edge or Chrome on the system |
+
+The authored `.robot` file declares only `Library  aitester_bdd.AITester`
+— our walker dispatches to whichever backend `AITESTER_BROWSER` selects.
+The author does NOT need to write a different `.robot` file for nodriver
+mode; the same suite runs on either backend.
 
 ### `agent-browser` quick reference
 
@@ -126,7 +145,6 @@ Every suite follows this shape:
 ```robot
 *** Settings ***
 Documentation     Short summary of what this suite verifies
-Library           Browser
 Library           aitester_bdd.AITester
 Suite Setup       Given I start verification "${DEPLOYMENT}"
 Suite Teardown    Then I finalize verification
@@ -360,7 +378,6 @@ The full keyword surface for state checks:
 ```robot
 *** Settings ***
 Documentation     Smoke test: login + open a case + verify it renders
-Library           Browser
 Library           aitester_bdd.AITester
 Suite Setup       Given I start verification "${DEPLOYMENT}"
 Suite Teardown    Then I finalize verification

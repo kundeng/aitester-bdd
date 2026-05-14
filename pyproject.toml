@@ -46,6 +46,16 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
 ]
+# Optional nodriver backend — raw CDP via Chrome/Edge.
+# Useful for two cases:
+#   1. Bot-detected sites (DataDome, Cloudflare, etc.) — no Playwright
+#      fingerprint, so detection heuristics that target Playwright miss.
+#   2. Environments where `rfbrowser init` (downloads ~300MB of browsers)
+#      is undesirable — nodriver uses any Edge/Chrome already on PATH.
+# Enable by installing this extra AND setting AITESTER_BROWSER=nodriver.
+stealth = [
+    "nodriver>=0.40",
+]
 docs = [
     "mkdocs>=1.6",
     "mkdocs-material>=9.5",
