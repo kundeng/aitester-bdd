@@ -513,6 +513,91 @@ I define rule "case_owner"
     And I merge into artifact "cases" on key "id"
 ```
 
+#### 4.7.6 Parametric expansion — one record per element / combination
+
+When the test wants **one record per matching element** (every row in
+a list, every card on the dashboard), or **one record per
+combination of inputs** (every role × every case kind), declare
+expansion on the rule. The walker runs the rule's `Then I extract
+fields` once per iteration, emitting each record into the rule's
+artifacts.
+
+**`When I expand over elements "${scope}"`** — iterate DOM elements.
+
+```robot
+When I expand over elements "${scope-css}"
+...    limit=<N>              # cap on iterations (default 100)
+...    exclude_if=<css>       # skip elements where this CHILD selector matches
+```
+
+Each iteration uses `${scope} >> nth=${i}` as the effective scope.
+Field locators are RELATIVE to the iteration element:
+  - `locator=.` means the element itself (extract its own attribute / text)
+  - `locator=.title` means `${scope} >> nth=${i} >> .title`
+
+```robot
+I define rule "case_rows"
+    When I open "${BASE_URL}/cases"
+    When I expand over elements "[data-testid=case-row]"
+    ...    limit=50
+    ...    exclude_if=".system-row"
+    Then I extract fields
+    ...    field=id     extractor=attr  locator=.       attr=data-case-id
+    ...    field=title  extractor=text  locator=".case-title"
+    ...    field=status extractor=text  locator=".status-badge"
+    And I emit to artifact "cases"
+And I set quality gate min records to 5
+```
+
+Each captured record also gets a `_iter` field with the iteration
+index, useful for differential debugging across runs.
+
+**`When I expand over elements "${scope}" with order "${order}"`** —
+same with explicit order. (`order=dfs` and `order=bfs` are accepted
+but no-op in v1 — child walking inside expansion is deferred.)
+
+**`When I expand over combinations`** — Cartesian product over axes.
+
+```robot
+When I expand over combinations
+...    action=<type|select|click>  control=<css>  values=<a|b|c>  exclude=<x|y>  skip=<N>
+...    action=<...>                 control=<...>  values=auto
+```
+
+Each axis selects values for ONE input:
+  - `values=<a|b|c>` — pipe-separated explicit list
+  - `values=auto` — discover from page (select `<option>` values, or
+    visible text of click candidates)
+  - `exclude=<x|y>` — drop these values from the list
+  - `skip=<N>` — drop the first N (good for the placeholder
+    "Select..." option)
+
+For each combination, the walker applies all axis actions in
+sequence, waits for networkidle, then captures + emits the record.
+Combo values are stamped on each record as `_combo_<control>` fields
+for differential debugging.
+
+```robot
+I define rule "matrix_render"
+    When I open "${BASE_URL}/cases"
+    When I expand over combinations
+    ...    action=click   control="[data-testid=role-tab]"     values=auto skip=1
+    ...    action=select  control="#kind-filter"               values=auto
+    Then I extract fields
+    ...    field=role  extractor=text   locator="[data-testid=role-tab].active"
+    ...    field=kind  extractor=value  locator="#kind-filter"
+    ...    field=count extractor=number locator=".case-row"
+    And I emit to artifact "coverage_matrix"
+And I set quality gate min records to 6     # 3 roles × 2 kinds
+And I set filled percentage for "count" to 100
+```
+
+> v1 limitation: child rules of an expanding rule run ONCE in topo
+> order (not per-element). Per-element child walking with scope and
+> context propagation is deferred to TIER 2.5. The single-record-per-iteration
+> capture covers the 80% test case ("emit one record per row + quality
+> gate on count + filled-pct on each field").
+
 ### 4.8 Quality gates — failing assertions on the artifact bag
 
 Unlike WISE (which only warns), aitester-bdd's quality gates **fail

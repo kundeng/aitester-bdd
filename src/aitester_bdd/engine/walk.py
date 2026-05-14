@@ -849,12 +849,17 @@ def _walk_rule(
             registry.fire_after_rule(verification, scenario, rule, result)
         return result
 
-    # ── Capture pipeline (artifact model — TIER 1 from WISE) ─────────
-    # If the rule declared `Then I extract fields` or `Then I extract
-    # table`, build a record now. Invoke post_extract hooks to normalize.
-    # Then push to every artifact in rule.emit_targets, honoring flatten
-    # and merge semantics.
-    if rule.has_capture:
+    # ── Capture pipeline (artifact model — TIER 1+2 from WISE) ───────
+    # Three modes:
+    #   1. Rule has expansion → iterate per element/combo, one record each
+    #   2. Rule has capture (field_specs/table_spec) but no expansion → one record
+    #   3. Neither — no capture
+    if rule.expansion is not None:
+        try:
+            _run_expansion(browser, rule, verification, scenario)
+        except Exception as exc:
+            log.warning("expansion failed for rule %r: %s", rule.name, exc)
+    elif rule.has_capture:
         try:
             record = _extract_record(browser, rule)
             if record is not None:
@@ -877,16 +882,21 @@ def _walk_rule(
 # ---------------------------------------------------------------------------
 
 
-def _extract_record(browser: BrowserAdapter, rule: Any) -> dict | None:
+def _extract_record(browser: BrowserAdapter, rule: Any, *, scope: str = "") -> dict | None:
     """Build a record from the rule's field_specs and/or table_spec.
 
     field_specs produce one record with named fields.
     table_spec produces a list of records (one per data row) which we
     flatten into the record under the table's name as a list.
+
+    `scope` (TIER 2) prefixes each field's locator for per-element
+    capture during expansion. Convention: `scope` is a CSS selector
+    that targets the iteration element; field locators are relative.
+    Special case: `locator="."` means "the element itself."
     """
     data: dict = {}
     for fs in rule.field_specs:
-        data[fs.name] = _extract_field(browser, fs)
+        data[fs.name] = _extract_field(browser, fs, scope=scope)
     if rule.table_spec is not None:
         rows = _extract_table_rows(browser, rule.table_spec)
         data[rule.table_spec.name] = rows
@@ -902,10 +912,24 @@ def _extract_record(browser: BrowserAdapter, rule: Any) -> dict | None:
     }
 
 
-def _extract_field(browser: BrowserAdapter, fs: Any) -> Any:
-    """Dispatch field extraction by extractor type."""
+def _extract_field(browser: BrowserAdapter, fs: Any, *, scope: str = "") -> Any:
+    """Dispatch field extraction by extractor type.
+
+    When `scope` is set (TIER 2 expansion), the effective selector is
+    `${scope} >> ${fs.locator}` — Playwright-style scoped query.
+    Special: `fs.locator == "."` resolves to `scope` itself.
+    """
     from urllib.parse import urljoin
-    css = browser.resolve_fallback_selector(fs.locator) if fs.locator else ""
+
+    if scope and fs.locator == ".":
+        css = scope
+    elif scope and fs.locator:
+        resolved = browser.resolve_fallback_selector(fs.locator)
+        css = f"{scope} >> {resolved}"
+    elif fs.locator:
+        css = browser.resolve_fallback_selector(fs.locator)
+    else:
+        css = ""
     try:
         if fs.extractor == "text":
             return browser.get_text(css).strip() if css else ""
@@ -1102,6 +1126,193 @@ def _emit_to_artifacts(verification: Any, rule: Any, record: dict, scenario: Any
 
         # Plain emit
         bag.append({**record, "scenario": scenario.name})
+
+
+# ---------------------------------------------------------------------------
+# Expansion (TIER 2) — parametric capture: iterate elements / combinations,
+# producing one record per iteration via the rule's field_specs.
+#
+# v1: each iteration captures into the rule's artifacts. Per-element child
+# walking with scope+context propagation is deferred (TIER 2.5).
+# ---------------------------------------------------------------------------
+
+
+def _run_expansion(
+    browser: BrowserAdapter, rule: Any, verification: Any, scenario: Any,
+) -> None:
+    """Dispatch by expansion mode."""
+    exp = rule.expansion
+    if exp.over == "elements":
+        _run_expansion_elements(browser, rule, verification, scenario)
+    elif exp.over == "combinations":
+        _run_expansion_combinations(browser, rule, verification, scenario)
+    else:
+        log.warning("unknown expansion mode %r", exp.over)
+
+
+def _run_expansion_elements(
+    browser: BrowserAdapter, rule: Any, verification: Any, scenario: Any,
+) -> None:
+    """Iterate elements at `expansion.scope`, capture one record per element."""
+    exp = rule.expansion
+    scope = browser.resolve_fallback_selector(exp.scope) if exp.scope else ""
+    if not scope:
+        log.warning("expansion has empty scope for rule %r", rule.name)
+        return
+
+    # Wait for at least one element to appear before counting.
+    browser.wait_for_elements_state(scope, "attached", timeout_ms=10_000)
+    try:
+        count = int(browser.get_count(scope) or 0)
+    except Exception as exc:
+        log.warning("expansion count failed for %r: %s", scope, exc)
+        return
+
+    if exp.limit and count > exp.limit:
+        count = exp.limit
+
+    for i in range(count):
+        elem_scope = f"{scope} >> nth={i}"
+        # exclude_if: skip elements where this child selector matches
+        if exp.exclude_if:
+            try:
+                child_count = browser.get_count(f"{elem_scope} >> {exp.exclude_if}")
+                if child_count > 0:
+                    log.debug("expansion: skipped element %d (exclude_if matched)", i)
+                    continue
+            except Exception:
+                pass
+
+        try:
+            record = _extract_record(browser, rule, scope=elem_scope)
+        except Exception as exc:
+            log.warning("per-element extract failed at i=%d: %s", i, exc)
+            continue
+        if record is None:
+            continue
+        record = _invoke_hooks_post_extract(verification, record)
+        # Stamp the iteration index for differential debugging.
+        record.setdefault("data", {})
+        record["data"].setdefault("_iter", i)
+        _emit_to_artifacts(verification, rule, record, scenario)
+
+
+def _run_expansion_combinations(
+    browser: BrowserAdapter, rule: Any, verification: Any, scenario: Any,
+) -> None:
+    """Cartesian product of axes. Per combo, apply axis actions then
+    capture+emit a record. Page returns to the post-action state after
+    each combo before the next combo's actions apply.
+    """
+    import itertools
+    import json
+
+    exp = rule.expansion
+    if not exp.axes:
+        return
+
+    # Resolve each axis's value list.
+    axis_values: list[list[str]] = []
+    for ax in exp.axes:
+        vals = list(ax.values)
+        if vals == ["auto"]:
+            vals = _discover_axis_values(browser, ax)
+        if ax.skip > 0:
+            vals = vals[ax.skip:]
+        if ax.exclude:
+            vals = [v for v in vals if v not in ax.exclude]
+        if ax.action == "select":
+            # Drop empty values for select dropdowns
+            vals = [v for v in vals if v]
+        axis_values.append(vals)
+
+    for combo in itertools.product(*axis_values):
+        # Apply each axis action to set this combo
+        for ax, value in zip(exp.axes, combo):
+            try:
+                _apply_axis_action(browser, ax, value)
+            except Exception as exc:
+                log.warning("axis action %s=%s failed: %s", ax.action, value, exc)
+
+        # Wait for AJAX (combo actions often trigger filtering)
+        try:
+            browser.wait_for_load_state("networkidle", timeout="5s")
+        except Exception:
+            pass
+
+        # Capture record for this combination
+        try:
+            record = _extract_record(browser, rule)
+        except Exception as exc:
+            log.warning("per-combo extract failed: %s", exc)
+            continue
+        if record is None:
+            record = {"data": {}, "rule": rule.name, "url": browser.url(),
+                      "extracted_at": _now_iso()}
+        # Tag combo values on the record for differential debugging
+        record.setdefault("data", {})
+        for ax, value in zip(exp.axes, combo):
+            record["data"][f"_combo_{ax.control}"] = value
+
+        record = _invoke_hooks_post_extract(verification, record)
+        _emit_to_artifacts(verification, rule, record, scenario)
+
+
+def _discover_axis_values(browser: BrowserAdapter, axis: Any) -> list[str]:
+    """Auto-discover values for `values=auto` axis.
+
+    For action=select: read the dropdown's <option> values via JS.
+    For action=click/type: read text content of every matching element.
+    """
+    import json
+    try:
+        if axis.action == "select":
+            v = browser.evaluate_js(
+                f"(() => {{ const el = document.querySelector({json.dumps(axis.control)}); "
+                f"return el ? Array.from(el.options).map(o => o.value) : []; }})()"
+            )
+            if isinstance(v, list):
+                return [str(x) for x in v]
+            return []
+        # type / click: discover by visible text
+        count = browser.get_count(axis.control)
+        out: list[str] = []
+        for i in range(count):
+            t = browser.get_text(f"{axis.control} >> nth={i}").strip()
+            if t:
+                out.append(t)
+        return out
+    except Exception as exc:
+        log.warning("auto-discover failed for %r: %s", axis.control, exc)
+        return []
+
+
+def _apply_axis_action(browser: BrowserAdapter, axis: Any, value: str) -> None:
+    """Set this axis to `value` via the configured action."""
+    if axis.action == "type":
+        browser.type(axis.control, value)
+    elif axis.action == "select":
+        browser.select(axis.control, value)
+    elif axis.action == "click":
+        # Click the matching element by text within the control set
+        try:
+            count = browser.get_count(axis.control)
+            for i in range(count):
+                sel = f"{axis.control} >> nth={i}"
+                txt = browser.get_text(sel).strip()
+                if txt == value:
+                    browser.click(sel)
+                    return
+        except Exception:
+            pass
+        log.warning("click axis: no element with text %r under %r", value, axis.control)
+    else:
+        log.warning("unknown axis action %r", axis.action)
+
+
+def _now_iso() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------

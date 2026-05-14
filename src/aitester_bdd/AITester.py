@@ -197,6 +197,50 @@ class QualityGate:
 
 
 @dataclass
+class CombinationAxis:
+    """One axis in `When I expand over combinations`.
+
+    action: type | select | click — what to do to set this axis to a value
+    control: CSS selector for the input/select/clickable that takes the value
+    values: list of values (or ["auto"] to discover from the page)
+    exclude: values to drop from the discovered list
+    skip: drop first N values (e.g., placeholder "Select...")
+    """
+
+    action: str  # type | select | click
+    control: str
+    values: list[str] = field(default_factory=list)
+    exclude: list[str] = field(default_factory=list)
+    skip: int = 0
+
+
+@dataclass
+class Expansion:
+    """Parametric iteration spec for a rule.
+
+    over:
+      elements    — iterate over DOM elements matching `scope`
+      combinations — Cartesian product of `axes` (each axis chooses values)
+
+    elements options:
+      scope         — CSS selector of the elements to iterate
+      limit         — max iterations (default 100)
+      exclude_if    — child-selector; element is skipped if it matches
+      order         — dfs | bfs (no effect in v1 — no child walking yet)
+
+    combinations options:
+      axes          — list of CombinationAxis (one per dimension)
+    """
+
+    over: str  # elements | combinations
+    scope: str = ""
+    limit: int = 100
+    exclude_if: str = ""
+    order: str = "dfs"
+    axes: list[CombinationAxis] = field(default_factory=list)
+
+
+@dataclass
 class HookDef:
     """Hook that fires at a named lifecycle point during the walk.
 
@@ -261,6 +305,8 @@ class Rule:
     emit_targets: list[str] = field(default_factory=list)
     emit_flatten_by: dict[str, str] = field(default_factory=dict)
     emit_merge_on: dict[str, str] = field(default_factory=dict)
+    # Parametric expansion (TIER 2)
+    expansion: Optional[Expansion] = None
 
     @property
     def has_action(self) -> bool:
@@ -1001,6 +1047,132 @@ class AITester:
         self._v.artifacts.setdefault(name, ArtifactSchema(name=name))
         self._v.artifact_store.setdefault(name, [])
         self._v.current_artifact = name
+
+    # ------------------------------------------------------------------
+    # Expansion — parametric iteration (TIER 2 from WISE)
+    #
+    # Two modes:
+    #   - over elements:    iterate matching DOM elements; per-element
+    #                       record via field_specs scoped to nth=i
+    #   - over combinations: Cartesian product of axes; per-combo apply
+    #                       axis actions, then capture+emit
+    #
+    # v1 captures one record per iteration into the rule's artifacts.
+    # Per-element CHILD WALKING with scope+context propagation is
+    # deferred (TIER 2.5).
+    # ------------------------------------------------------------------
+
+    @keyword("When I expand over elements \"${scope}\"")
+    def expand_over_elements(self, scope: str, *options: str) -> None:
+        """Iterate over DOM elements matching `scope`.
+
+        For each matching element, the rule's `Then I extract fields`
+        runs scoped to `<scope> >> nth=<i>`, producing one record per
+        element. Records emit into the rule's artifacts.
+
+        Options (continuation rows):
+          limit=<N>             # max elements (default 100)
+          exclude_if=<css>      # drop elements where this child selector matches
+
+        Example:
+            I define rule "case_rows"
+                When I open "${BASE_URL}/cases"
+                When I expand over elements "[data-testid=case-row]"
+                ...    limit=50
+                ...    exclude_if=".system-row"
+                Then I extract fields
+                ...    field=id     extractor=attr  locator=.  attr=data-case-id
+                ...    field=title  extractor=text  locator=".case-title"
+                And I emit to artifact "cases"
+        """
+        kv = _parse_options(options)
+        rule = self._current_rule()
+        rule.expansion = Expansion(
+            over="elements",
+            scope=_strip_quotes(scope),
+            limit=int(kv.get("limit", "100")),
+            exclude_if=_strip_quotes(kv.get("exclude_if", "")),
+        )
+
+    @keyword("When I expand over elements \"${scope}\" with order \"${order}\"")
+    def expand_over_elements_with_order(self, scope: str, order: str, *options: str) -> None:
+        """Same as `expand over elements`, with explicit DFS/BFS order.
+
+        Order is no-op in v1 — child walking inside expansion is deferred.
+        Kept for forward compatibility with WISE skill grammar.
+        """
+        kv = _parse_options(options)
+        rule = self._current_rule()
+        rule.expansion = Expansion(
+            over="elements",
+            scope=_strip_quotes(scope),
+            limit=int(kv.get("limit", "100")),
+            exclude_if=_strip_quotes(kv.get("exclude_if", "")),
+            order=_strip_quotes(order),
+        )
+
+    @keyword("When I expand over combinations")
+    def expand_over_combinations(self, *axes: str) -> None:
+        """Cartesian product of axes — for each combo, apply axis actions
+        and capture a record.
+
+        Continuation rows (one per axis, terminated by next `action=`):
+          action=<type|select|click>
+          control=<css>
+          values=<a|b|c>           # pipe-separated, OR `auto` to discover
+          exclude=<a|b>            # values to drop
+          skip=<N>                 # drop first N (placeholder "Select...")
+
+        Example: verify the page renders for every (role × case kind):
+            I define rule "combo_render"
+                When I open "${BASE_URL}/cases"
+                When I expand over combinations
+                ...    action=click control="[data-testid=role-tab]" values=auto skip=1
+                ...    action=click control="[data-testid=kind-filter]" values=auto
+                Then I extract fields
+                ...    field=role  extractor=text locator="[data-testid=role-tab].active"
+                ...    field=kind  extractor=text locator="[data-testid=kind-filter].active"
+                ...    field=count extractor=number locator=".case-row"
+                And I emit to artifact "combo_coverage"
+        """
+        # Parse axes: each `action=` starts a new axis.
+        parsed: list[CombinationAxis] = []
+        current: dict[str, str] = {}
+
+        def flush() -> None:
+            if current.get("action"):
+                vals_raw = current.get("values", "")
+                vals = vals_raw.split("|") if vals_raw else []
+                excl_raw = current.get("exclude", "")
+                excl = excl_raw.split("|") if excl_raw else []
+                parsed.append(CombinationAxis(
+                    action=current["action"],
+                    control=_strip_quotes(current.get("control", "")),
+                    values=vals,
+                    exclude=excl,
+                    skip=int(current.get("skip", "0")),
+                ))
+
+        # Flatten args (robust to 1-space and 2+-space RF separators)
+        tokens: list[str] = []
+        for spec in axes:
+            for tok in spec.split():
+                if tok:
+                    tokens.append(tok)
+        for tok in tokens:
+            if "=" not in tok:
+                continue
+            k, _, v = tok.partition("=")
+            k = k.strip()
+            if k == "action":
+                flush()
+                current = {"action": v.strip()}
+            else:
+                current[k] = v.strip()
+        flush()
+
+        rule = self._current_rule()
+        rule.expansion = Expansion(over="combinations", axes=parsed)
 
     @keyword("And I set quality gate min records to ${count}")
     def quality_gate_min_records(self, count: str) -> None:
