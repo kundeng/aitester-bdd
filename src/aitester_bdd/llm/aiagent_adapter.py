@@ -19,15 +19,15 @@ OpenAI, Anthropic, Azure, Bedrock, OpenAI-compat proxies, etc. Multimodal
 to each provider's native form.
 
 Config (env vars):
-  AITESTER_LLM_MODEL  — LiteLLM model spec
-                        Examples:
-                          "openai/gpt-4o-mini"
-                          "anthropic/claude-haiku-4-5-20251001"
-                          "openai/claude-opus-4-7"  (with OPENAI_BASE_URL set)
-  OPENAI_BASE_URL     — point at a proxy (claude-code-proxy / LiteLLM / vLLM)
-  OPENAI_API_KEY      — auth for openai/* models or compat proxies
-  ANTHROPIC_API_KEY   — auth for anthropic/* models
-  (other providers: see LiteLLM docs)
+  AITESTER_LLM_MODEL  — LiteLLM model spec; default points at the
+                        claude-code-proxy:
+                          "openai/cc/claude-opus-4-7"
+  OPENAI_BASE_URL     — proxy URL; default "http://localhost:20128/v1"
+  OPENAI_API_KEY      — auth (placeholder works against claude-code-proxy)
+
+Other providers work too — anything LiteLLM supports — but this project
+is wired against the local claude-code-proxy by default. Override the
+three env vars to swap providers.
 """
 from __future__ import annotations
 
@@ -84,15 +84,20 @@ Reply with EXACTLY one word: PASS or FAIL.
 """
 
 
+DEFAULT_MODEL = "openai/cc/claude-opus-4-7"
+DEFAULT_BASE_URL = "http://localhost:20128/v1"
+DEFAULT_API_KEY = "placeholder"  # claude-code-proxy ignores the key
+
+
 def _resolve_model(explicit: Optional[str]) -> str:
-    model = explicit or os.environ.get("AITESTER_LLM_MODEL")
-    if not model:
-        raise RuntimeError(
-            "No LLM model configured. Set AITESTER_LLM_MODEL env var "
-            "(e.g. 'openai/gpt-4o-mini' or 'anthropic/claude-haiku-4-5-20251001'). "
-            "If pointing at a local proxy, also set OPENAI_BASE_URL."
-        )
-    return model
+    return explicit or os.environ.get("AITESTER_LLM_MODEL", DEFAULT_MODEL)
+
+
+def _ensure_proxy_env() -> None:
+    """If pointing at the default claude-code-proxy, set OPENAI_BASE_URL +
+    OPENAI_API_KEY so litellm picks them up. No-op if user already set them."""
+    os.environ.setdefault("OPENAI_BASE_URL", DEFAULT_BASE_URL)
+    os.environ.setdefault("OPENAI_API_KEY", DEFAULT_API_KEY)
 
 
 class AIAgentLLM:
@@ -101,6 +106,7 @@ class AIAgentLLM:
 
     def __init__(self, *, model: Optional[str] = None) -> None:
         self.model = _resolve_model(model)
+        _ensure_proxy_env()
 
     def _completion(self, messages: list[dict], *, max_tokens: int = 2048) -> str:
         """Single litellm completion call. Returns the assistant text."""

@@ -227,9 +227,9 @@ def _eval_state_check(
 # ---------------------------------------------------------------------------
 # Semantic / visual_semantic — sparingly used, opt-in by env config.
 #
-# AITESTER_LLM_MODEL must be set (e.g. "openai/gpt-4o-mini") and the
-# matching provider credentials in env. If unset, the check fails with
-# a clear "not configured" message instead of silently passing.
+# AITESTER_LLM_MODEL defaults to the claude-code-proxy
+# ("openai/cc/claude-opus-4-7" against OPENAI_BASE_URL=
+# http://localhost:20128/v1). Override to swap providers.
 # ---------------------------------------------------------------------------
 
 
@@ -238,15 +238,14 @@ _LLM_CACHE: object = _UNSET
 
 
 def _get_llm():
-    """Lazy-load the LLM adapter; returns None if not configured."""
+    """Lazy-load the LLM adapter.
+
+    Default config points at the claude-code-proxy on localhost; override
+    via AITESTER_LLM_MODEL / OPENAI_BASE_URL. Init failures are reported
+    in the StateCheck observation, not silently swallowed."""
     global _LLM_CACHE
     if _LLM_CACHE is not _UNSET:
         return _LLM_CACHE
-    import os
-
-    if not os.environ.get("AITESTER_LLM_MODEL"):
-        _LLM_CACHE = None
-        return None
     try:
         from aitester_bdd.llm.aiagent_adapter import AIAgentLLM
         _LLM_CACHE = AIAgentLLM()

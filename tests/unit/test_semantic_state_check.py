@@ -36,13 +36,20 @@ def _make(scenario_name="flow", entry_url="http://x"):
     return t
 
 
-def test_semantic_not_configured_fails_with_clear_message(monkeypatch):
-    """Without AITESTER_LLM_MODEL, the check FAILS (not silently passes)."""
+def test_semantic_llm_call_failure_fails_rule_with_clear_message(monkeypatch):
+    """If the LLM raises (e.g. proxy down, auth error), the rule fails
+    with the error visible in the observation — never silently passes."""
     from aitester_bdd.engine import walk
     from aitester_bdd.engine.walk import walk_verification
 
-    monkeypatch.delenv("AITESTER_LLM_MODEL", raising=False)
+    class RaisingLLM:
+        def judge(self, *, criterion, observation):
+            raise RuntimeError("proxy connection refused")
+        def judge_visual(self, *, criterion, png_bytes):
+            raise RuntimeError("proxy connection refused")
+
     walk.reset_llm_cache()
+    walk._LLM_CACHE = RaisingLLM()
 
     t = _make()
     t.define_rule('"sem"')
@@ -56,7 +63,7 @@ def test_semantic_not_configured_fails_with_clear_message(monkeypatch):
     assert verdict.failed
     r = verdict.results[0]
     assert r.failure_step_kind == "observation_or_assertion"
-    assert "not configured" in r.observed.lower()
+    assert "proxy connection refused" in r.observed
 
 
 def test_semantic_pass_when_llm_returns_true(monkeypatch):

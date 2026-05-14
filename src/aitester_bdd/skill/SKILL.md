@@ -1,70 +1,121 @@
 ---
 name: aitester-bdd
-description: LLM-driven BDD test authoring for Robot Framework. Author and refine .robot test suites with snapshot-grounded selectors, rule DAG composition, and observation-gate discipline. Use when generating tests from a story or refining a failing suite.
+description: Author Robot Framework BDD test suites for web apps. You (the agent) drive a live browser via agent-browser to explore the target, then produce a deterministic .robot file using the shipped keyword grammar — or a bug report if the system itself is broken in a way that prevents authoring. Use when given a story (intention) and a base URL.
 metadata:
   author: kundeng
-  version: "0.1.0"
-  skill_version: 1
+  version: "0.2.0"
+  skill_version: 2
 ---
 
-# aitester-bdd — BDD authoring grammar
+# aitester-bdd — agent skill for authoring `.robot` test suites
 
-You are authoring a Robot Framework `.robot` test suite for a live web app. The suite is **executable**, **deterministic**, and **assertion-rich**. It must dryrun-clean before it runs.
+You are the agent. The user gave you a **story** (an intention to verify) and a **base URL**. Your job: produce ONE of two outputs.
+
+1. **A `.robot` file** at `suite.robot` — the codified, deterministic test. Selectors grounded in snapshots you actually took. Runs without you afterwards (`robot suite.robot`).
+2. **A bug report** at `triage/<story-slug>.md` — when the system itself is broken in a way that prevents you from authoring a meaningful test. Markdown. Brief. Names exactly where you got stuck.
+
+No third option. You don't return a "best effort" suite that pretends to test something you couldn't actually drive. You either ground the test, or you tell the human the system is broken.
 
 ```mermaid
 flowchart LR
-  endow --> explore --> author
+  orient --> explore --> author
   author <--> refine
-  refine --> ship
+  author --> ship
+  explore -.-> bug_report
+  author  -.-> bug_report
 ```
 
-**Key invariants:** every step is a Given/When/Then/And/But; selectors come from observed snapshots, not invention; assertions live inside their rule, not as a final-state judge; rules compose via `And I declare parents`; observation gates replace `When I wait`; `robot --dryrun` must pass before execution.
+Use when: given a story + base URL, produce an aitester-bdd `.robot` suite.
 
-Use when: a story (intention) needs to become a working `.robot` test suite, or a dryrun-failing suite needs refinement.
-
-Do not use when: hand-writing a one-off test; production CI is running already-shipped suites (no LLM in the loop at execution time).
+Do not use when: there's no live target to drive (no URL); the user is hand-writing a one-off pytest; production CI is running already-shipped `.robot` files (those don't need you).
 
 ---
 
-## 1 — Phases (Endow → Explore → Author → Refine → Ship)
+## 1 — Phases and the tools you use
 
-| Phase | CLI | What happens | Output |
-|-------|-----|-------------|--------|
-| Endow | `aitester doctor` | Validate environment (RF, browser, aiagent, target reachable) | Green checks |
-| Explore | `aitester discover` | Snapshot or source-walk target app, propose suite skeleton | `draft.robot` with TODO selectors |
-| Author | `aitester author` | Given story + snapshot + skill, emit complete `.robot` | `suite.robot` |
-| Refine | (auto-loop) | Given dryrun output + fresh snapshot, patch the suite | refined `suite.robot` |
-| Ship | `robot suite.robot` | Plain RF execution, no LLM | `log.html`, `output.xml`, verdict |
+| Phase | What you do | Tool |
+|-------|-------------|------|
+| Orient | Confirm env: RF, rfbrowser, agent-browser, LLM config | `aitester doctor` |
+| Explore | Drive the **live target** via `agent-browser`. Log in if needed, navigate the actual pages of the story, take snapshots at each step. Record selectors you can prove exist. | `agent-browser open / snapshot / click / type / ...` |
+| Author | Write `suite.robot` using ONLY the keywords in § 4. Every selector must come from a snapshot you took during Explore. | Edit / Write |
+| Review | `robot --dryrun` must pass cleanly. Fix any unknown-keyword / arg-shape errors. | `robot --dryrun suite.robot` |
+| Refine | If a real run fails, re-explore the failing step, patch the suite. | `agent-browser` + edit |
+| Ship | Hand `suite.robot` to the user. They run `robot suite.robot` without you. | — |
 
-### Authoring inputs
+### `agent-browser` quick reference
 
-When authoring, you receive:
+This is your eyes and hands during Explore. Sessions persist across calls — chain with `&&`.
 
-1. **The story** — a plain-English intention (e.g., "approve case MAIN-0001 and verify the decision persists across reload")
-2. **A live snapshot** — accessibility tree of the entry page with CSS selectors, `data-testid`, `aria-label`, `role`, text, attribute summaries
-3. **This SKILL.md** — the keyword grammar and patterns
-4. **Optional: source-context** — for white-box mode, framework-aware summaries of routes/components/state
+```bash
+agent-browser open <url>              # navigate
+agent-browser snapshot                # accessibility tree of current page
+agent-browser snapshot -c -d 3        # include CSS classes, depth 3
+agent-browser get count '<css>'       # count matching elements
+agent-browser get text '<css>'        # text content
+agent-browser get html '<css>'        # outer HTML
+agent-browser click '<css>'           # click
+agent-browser type '<css>' '<text>'   # fill input
+agent-browser eval '<js>'             # run JS in page context
+agent-browser screenshot              # save PNG (for visual checks)
+agent-browser close                   # tear down session
+```
 
-You must NOT:
-- Invent selectors not visible in the snapshot
-- Invent natural-language verbs ("When I open the case page")
-- Use `When I wait ${ms} ms` for asynchronous behavior — use observation gates instead
-- Combine actions and assertions in one keyword
+If `agent-browser` is missing, stop and tell the user — don't try to author blind.
+
+### Exploration-first rule (non-negotiable)
+
+Before you write a single selector in the suite, you must have driven that part of the flow live via `agent-browser` and confirmed:
+
+- The entry URL loads (status, redirect target).
+- The auth flow (if any) works with the credentials you'll bake into the suite.
+- Every page the story passes through actually renders, and the elements you'll target are real.
+- The terminal state of the story (the thing the test verifies) is observable on the page.
+
+If any of those is not true, you do **NOT** invent a selector to cover the gap. You write a **bug report** (§ 1.2). Imagined selectors look like passing tests when they're really testing nothing.
+
+### Bug report shape
+
+When the system is broken in a way that prevents authoring a meaningful test, write `triage/<story-slug>.md` with:
+
+```markdown
+# Bug report: <story summary>
+
+**Story:** <the user's intention, verbatim>
+**Base URL:** <url>
+**Stopped at step:** <which step in the story you could not codify>
+
+## What I tried
+
+- <each agent-browser command you ran and what came back>
+
+## What I observed
+
+- <the actual page state, error, or missing element>
+
+## Why I cannot author the test
+
+<one paragraph — what would need to be true for this story to be testable,
+and what is not true today>
+```
+
+Keep it short. The point is to surface "system is broken here" to a human, not produce a runbook. End the bug report by naming exactly where you got stuck.
 
 ---
 
 ## 2 — Non-Negotiables
 
-1. Output only valid Robot Framework syntax.
-2. All executable steps use `Given`, `When`, `Then`, `And`, or `But`.
-3. Use the **shipped keyword library** — never invent site-specific keywords.
-4. **Every selector must trace to a visible element in the snapshot.** If unsure, do not author — request a fresh snapshot.
-5. Site specifics go in variables, arguments, continuation rows, and locators.
-6. Keep setup, rules, observations, actions, and assertions explicit.
-7. **Never use `When I wait`** — use observation gates instead (§ 6).
-8. **Dismiss selectors must be surgical** — must not match interactive panels the test depends on.
-9. **Each rule has one purpose.** Login is a rule. Navigate-to-case is a rule. Approve is a rule. Use `And I declare parents` to compose them.
-10. **Assertions live inside the rule that produced the state.** Do not separate steps from assertions across rules.
+1. **You explore the live target via `agent-browser` BEFORE writing selectors.** Every selector in the suite must trace to a snapshot you took.
+2. **Two outputs only:** a `.robot` suite, or a bug report. No half-authored "I hope this works" suites.
+3. Output only valid Robot Framework syntax in `.robot` files.
+4. All executable steps use `Given`, `When`, `Then`, `And`, or `But`.
+5. Use the **shipped keyword library** (§ 4) — never invent site-specific keyword names.
+6. Site specifics go in variables, arguments, continuation rows, and locators.
+7. **Never use `When I wait ${ms} ms`** — use observation gates (§ 6.4).
+8. **Dismiss selectors must be surgical** — they must not match interactive panels the test depends on (§ 6.5).
+9. **Each rule has one purpose.** Login is a rule. Navigate-to-case is a rule. Approve is a rule. Compose with `And I declare parents`.
+10. **Assertions live inside the rule that produced the state** — not in a separate end-state judge.
+11. `robot --dryrun` must pass before you hand the suite to the user.
+12. Semantic / visual_semantic checks (§ 4.3 escape hatch) only when deterministic checks genuinely can't express the assertion.
 
 ---
 
@@ -506,22 +557,29 @@ If execution fails: read `log.html`, find the failing rule, snapshot at the fail
 
 ## 8 — Agent Contract
 
-1. **Snapshot first.** Never propose a selector you have not seen in a snapshot.
-2. **Use shipped keywords only.** No site-specific verbs.
-3. **One rule = one named transition.** Decompose compound flows into multiple rules with parent declarations.
-4. **Position-determined state checks.** Before an action = guard. After an action = observation gate. Before assertions = guard. After actions = both observation + assertion if both needed.
-5. **Assertions go inside the rule that produced the state.** Do not delay assertions to a separate "judge rule" — that's the failure pattern this library is designed to prevent.
-6. **Refine, don't restart.** When dryrun fails, patch the existing suite using the dryrun output; don't rewrite from scratch.
-7. **Variables for site specifics, locators for selectors.** Suite should be readable at the rule level without knowing the target site's quirks.
+You agreed to all of these by invoking this skill:
+
+1. **Drive the live target first.** Open it. Snapshot it. Log in if needed. Click through the actual flow. Take a fresh snapshot at every page transition. Only then start writing the `.robot`.
+2. **No imagined selectors.** Every selector in the suite must trace to a snapshot you took. If a selector is uncertain, snapshot again or write a bug report — do not guess.
+3. **Use shipped keywords only.** No site-specific verbs. If the keyword you want doesn't exist, prefer `And I call keyword "name"` with a `*** Keywords ***` block (visible RF code) over `And I evaluate js` (opaque JS).
+4. **One rule = one named transition.** Decompose compound flows into multiple rules with parent declarations.
+5. **Position-determined state checks.** Before an action = guard. After an action = observation gate / assertion.
+6. **Assertions go inside the rule that produced the state.** Do not delay assertions to a separate "judge rule."
+7. **Refine, don't restart.** When dryrun or live run fails, re-explore the failing step, patch the existing suite; don't rewrite from scratch.
+8. **Variables for site specifics, locators for selectors.** Suite must be readable at the rule level.
+9. **Two outputs only.** A `.robot` suite that you stand behind, or a bug report in `triage/`. Not "best effort" garbage.
 
 ### What the agent must NOT do
 
 | Bad | Good |
 |-----|------|
+| Author the suite without ever calling `agent-browser` | Drive the live flow first, then write |
 | `When I navigate to the case detail page` | `When I open "${BASE_URL}/#/case/MAIN-0168"` |
 | `Then I see the approved badge` | `Then locator ".decision-badge" has text "Approved"` |
 | `When I wait 3 seconds for the page to load` | `And selector "[data-testid=overview-page]" exists` |
 | `When I click the approve button` | `When I click locator "[data-testid=case-approve]"` |
+| Guess a selector that "probably exists" | Snapshot again, or write a bug report |
+| Ship a suite that dryrun-fails | `robot --dryrun` clean is required before handoff |
 
 ---
 
@@ -561,6 +619,48 @@ Record each as a pair: triggering action + completion selector. These become obs
 
 | File | Purpose |
 |------|---------|
-| `keyword_reference.md` | Auto-generated full keyword catalog with continuation-row schema |
-| `patterns.md` | Extended patterns library (advanced use cases) |
-| `examples/quickstart/login_smoke.robot` | Minimal working example |
+| `examples/quickstart/login_smoke.robot` | Minimal working example — login + open case + verify renders |
+| `engine/README.md` | The walker's gotcha-fix map (what it handles for you at run time) |
+
+## 11 — Common patterns for `agent-browser` during Explore
+
+```bash
+# Discover what's at the entry URL
+agent-browser open "${BASE_URL}" && agent-browser snapshot
+
+# Drive an auth flow before the actual test surface exists
+agent-browser open "${BASE_URL}/#/login" \
+  && agent-browser type 'input[name=username]' 'admin' \
+  && agent-browser type 'input[name=password]' 'admin' \
+  && agent-browser click 'button[type=submit]' \
+  && agent-browser snapshot          # confirm the post-login page
+
+# Reach the page the story is about, snapshot every transition
+agent-browser open "${BASE_URL}/#/case/MAIN-0168" \
+  && agent-browser snapshot
+
+# Probe an interactive element you intend to use in the suite
+agent-browser get count '[data-testid=case-approve]'
+
+# Take a screenshot if you'll need a visual_semantic check
+agent-browser screenshot
+```
+
+After each `snapshot`, note: the selectors you'll use, the data-testids you saw, the URL the SPA is now on, the text content of elements you'll assert against. Only THEN open the editor and write `suite.robot`.
+
+## 12 — When to file a bug report instead
+
+You write `triage/<story-slug>.md` (NOT a `.robot` suite) when any of these is true after a real exploration attempt:
+
+- The base URL is unreachable, returns 5xx, or redirects to a page unrelated to the story.
+- The auth flow specified in the story doesn't accept the credentials provided.
+- The page the story is about doesn't render, errors out, or is missing the element the story is about ("approve case" but no approve button exists).
+- The terminal state the story wants to verify is not observable (story says "the decision persists" but the page shows no decision indicator anywhere).
+- The agent-browser CLI itself errors out repeatedly (target not driveable).
+
+Do NOT file a bug report for:
+- Selectors you couldn't guess — that's a "take another snapshot" problem, not a bug.
+- An async timing issue — that's an observation-gate problem, fix it with `await=` or split rules.
+- A dryrun failure — that's a refine problem, patch the suite.
+
+The bug report exit is for "the system is genuinely broken or absent in a way that makes this story untestable today." Not for your authoring difficulties.
