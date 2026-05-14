@@ -76,6 +76,33 @@ class GetAttrParams(BaseModel):
     name: str = Field(description="Attribute name (e.g. 'data-testid', 'href').")
 
 
+class ValidateSelectorParams(BaseModel):
+    css: str = Field(
+        description=(
+            "CSS selector to validate. Can include pipe-fallback "
+            "(`a | b | c`) — each candidate is checked independently."
+        ),
+    )
+    scope: str = Field(
+        default="",
+        description=(
+            "Optional parent scope. If provided, each candidate is "
+            "tested under `scope >> candidate`. Use this to disambiguate "
+            "selectors that aren't unique page-wide but are unique "
+            "within a card / panel / row."
+        ),
+    )
+    expected: str = Field(
+        default="unique",
+        description=(
+            "What count you expect: 'unique' (count == 1, the default — "
+            "for click/type/observe targets) OR 'many' (count >= 1 — "
+            "for table rows, list items, expansion targets) OR 'absent' "
+            "(count == 0 — for negation/disappearance asserts)."
+        ),
+    )
+
+
 class ReadFileParams(BaseModel):
     path: str = Field(description="Absolute path inside the configured source_root.")
 
@@ -361,6 +388,183 @@ def browser_get_attr(css: str, name: str) -> str:
     return _w().call(_do, css, name)
 
 
+# JS executed in the page to introspect a candidate match.
+# Returns count + (for the first match) a "robustness profile":
+#   stable_attrs   — attributes a robust selector should key on
+#                    (data-testid, aria-label, name, role, id, href)
+#   classes        — class list (so we can warn about brittle utility
+#                    soup like "rounded-lg px-3 py-2 text-sm")
+#   tag, text      — basic identity hints
+# The agent uses this to decide whether the selector it picked is
+# (a) unique (count == 1), (b) robust (keys on a stable attr or
+# semantic role rather than a long compound-class), and (c) what to
+# fall back to / scope against if it isn't.
+_VALIDATE_JS = """
+(css) => {
+  const els = Array.from(document.querySelectorAll(css));
+  const count = els.length;
+  if (count === 0) return {count: 0};
+  const e = els[0];
+  const STABLE_ATTRS = [
+    'data-testid', 'aria-label', 'aria-labelledby',
+    'name', 'id', 'role', 'href', 'placeholder', 'title', 'alt',
+  ];
+  const stable = {};
+  for (const a of STABLE_ATTRS) {
+    const v = e.getAttribute(a);
+    if (v) stable[a] = v;
+  }
+  const cls = (e.getAttribute('class') || '').trim().split(/\\s+/).filter(Boolean);
+  const text = (e.innerText || '').trim().slice(0, 80);
+  return {
+    count,
+    tag: e.tagName.toLowerCase(),
+    stable_attrs: stable,
+    classes: cls,
+    text,
+  };
+}
+"""
+
+
+# Tailwind utility class prefixes — selectors built ONLY out of these
+# are brittle (rebuild on theme tweaks, variant additions, JIT purge).
+# A selector with one or two non-utility classes is fine; flag when
+# every class in the chain is a utility.
+_TAILWIND_PREFIXES = (
+    "px-", "py-", "pt-", "pb-", "pl-", "pr-", "p-",
+    "mx-", "my-", "mt-", "mb-", "ml-", "mr-", "m-",
+    "w-", "h-", "min-w-", "min-h-", "max-w-", "max-h-",
+    "bg-", "text-", "border-", "rounded-", "shadow-", "ring-",
+    "flex-", "grid-", "gap-", "space-", "divide-",
+    "items-", "justify-", "self-", "place-", "content-",
+    "leading-", "tracking-", "font-", "uppercase", "lowercase",
+    "overflow-", "z-", "opacity-", "cursor-", "select-", "pointer-",
+    "transition-", "duration-", "ease-", "animate-",
+    "hover:", "focus:", "active:", "disabled:", "group-",
+    "sm:", "md:", "lg:", "xl:", "2xl:", "dark:",
+)
+
+
+def _looks_brittle(classes: list[str], css: str) -> tuple[bool, str]:
+    """Quick brittleness check for a selector based on the matched
+    element's classes. Returns (is_brittle, why)."""
+    # If selector keys on a stable attribute (data-testid, aria-label,
+    # id, name, role, href), we don't care about brittle class soup.
+    for marker in ("data-testid=", "aria-label=", "[id=", "#",
+                   "[name=", "role=", "[href"):
+        if marker in css:
+            return False, ""
+    # If selector compounds 3+ classes AND every class is a utility,
+    # flag it. e.g. ".px-3.py-2.text-sm.rounded-lg.bg-blue-500"
+    dotted = [c.strip(".") for c in css.split(".") if c.strip(".")]
+    class_tokens = [c for c in dotted if not any(
+        ch in c for ch in ("[", "]", ">", " ", "#")
+    )]
+    if len(class_tokens) >= 3 and all(
+        any(t.startswith(p) for p in _TAILWIND_PREFIXES)
+        for t in class_tokens
+    ):
+        return True, (
+            "selector is built only from Tailwind utility classes — "
+            "these rebuild on theme/variant changes. Prefer a "
+            "data-testid, aria-label, role+name, or one semantic class."
+        )
+    return False, ""
+
+
+def browser_validate_selector(
+    css: str, scope: str = "", expected: str = "unique",
+) -> str:
+    """Validate a CSS selector against the live page BEFORE writing it
+    into a .robot suite.
+
+    Returns a JSON report:
+      {
+        "candidate": "<css under scope>",
+        "count": N,
+        "expected": "unique|many|absent",
+        "ok": bool,
+        "warning": "..." or null,
+        "stable_attrs": {...},      # data-testid, aria-label, etc.
+        "classes": [...],
+        "text": "...",
+        "suggestion": "..." or null,
+      }
+
+    For pipe-fallback selectors (`a | b | c`), each candidate is
+    validated independently and the report is a list per candidate.
+    """
+    def _do(page, raw: str, sc: str, exp: str):
+        candidates = [s.strip() for s in raw.split("|")] if "|" in raw else [raw]
+        reports = []
+        for cand in candidates:
+            full = (
+                cand if not sc
+                else (sc if cand.strip() == "." else f"{sc} >> {cand}")
+            )
+            try:
+                info = page.evaluate(_VALIDATE_JS, full)
+            except Exception as exc:
+                reports.append({
+                    "candidate": full, "error": str(exc), "ok": False,
+                })
+                continue
+            count = info.get("count", 0)
+            if exp == "unique":
+                ok = (count == 1)
+            elif exp == "many":
+                ok = (count >= 1)
+            elif exp == "absent":
+                ok = (count == 0)
+            else:
+                ok = False
+            report: dict = {
+                "candidate": full, "count": count,
+                "expected": exp, "ok": ok,
+            }
+            if count > 0:
+                report["tag"] = info.get("tag")
+                report["stable_attrs"] = info.get("stable_attrs", {})
+                report["classes"] = info.get("classes", [])
+                report["text"] = info.get("text", "")
+                brittle, why = _looks_brittle(
+                    info.get("classes", []), full,
+                )
+                if brittle:
+                    report["warning"] = why
+                if exp == "unique" and count > 1:
+                    stable = info.get("stable_attrs", {})
+                    if stable:
+                        # Suggest the most specific stable attr first.
+                        for k in ("data-testid", "aria-label", "id",
+                                  "name", "role", "href"):
+                            if k in stable:
+                                report["suggestion"] = (
+                                    f'tighten to [{k}="{stable[k]}"]'
+                                    + (f" under scope {sc!r}" if sc else "")
+                                )
+                                break
+                    else:
+                        report["suggestion"] = (
+                            "no stable attrs on the matched element — "
+                            "add a parent scope ('And I scope children to') "
+                            "or pick a different starting element."
+                        )
+            else:
+                if exp != "absent":
+                    report["suggestion"] = (
+                        "0 matches — re-check via browser_snapshot, "
+                        "the element may not be rendered yet (await), "
+                        "or the selector spelling is wrong."
+                    )
+            reports.append(report)
+        if len(reports) == 1:
+            return json.dumps(reports[0], indent=2)
+        return json.dumps({"candidates": reports}, indent=2)
+    return _w().call(_do, css, scope, expected)
+
+
 def browser_eval(js: str) -> str:
     """Run a JS expression in the page context. Returns the result as text."""
     def _do(page, expr):
@@ -494,6 +698,25 @@ def build_tools(
         StructuredTool.from_function(
             func=browser_get_attr, name="browser_get_attr", args_schema=GetAttrParams,
             description="Get a single attribute value from the first matching element.",
+        ),
+        StructuredTool.from_function(
+            func=browser_validate_selector, name="browser_validate_selector",
+            args_schema=ValidateSelectorParams,
+            description=(
+                "REQUIRED BEFORE WRITING ANY SELECTOR INTO .robot. "
+                "Validates the candidate against the live page: returns "
+                "{count, ok (vs expected), stable_attrs, classes, text, "
+                "warning, suggestion}. "
+                "expected='unique' (default) for click/type/observe; "
+                "'many' for table rows or expansion targets; 'absent' "
+                "for disappearance asserts. "
+                "If ok=false, READ THE SUGGESTION — tighten to a "
+                "data-testid / aria-label / id, OR add scope. "
+                "If warning is set, the selector compounds Tailwind "
+                "utility classes — replace it with a semantic anchor. "
+                "Validate every selector you write, including pipe-fallback "
+                "alternatives (`a | b | c` — each is checked independently)."
+            ),
         ),
         StructuredTool.from_function(
             func=browser_eval, name="browser_eval", args_schema=EvalParams,

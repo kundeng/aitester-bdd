@@ -593,28 +593,40 @@ class _PlaywrightBackend:
     # Selector fallback resolution — ported from WISE.
     # ------------------------------------------------------------------
 
-    def resolve_fallback_selector(self, raw: str) -> str:
-        """Resolve a pipe-fallback selector.
+    def resolve_fallback_selector(self, raw: str, scope: str = "") -> str:
+        """Resolve a pipe-fallback selector, optionally scoped.
 
         Syntax: `"primary | fallback1 | fallback2"`. The walker tries each
         candidate on the live page and returns the first that matches.
-        Plain selectors (no ` | `) pass through unchanged.
+        Plain selectors (no ` | `) pass through unchanged (modulo scope).
+
+        When `scope` is set (TIER 2.5 child scope propagation), every
+        candidate is prefixed with `<scope> >> ` before testing. A raw
+        selector of `.` means "the scope element itself."
 
         Ported from WISE: real apps re-skin frequently; a test that
         encodes both the old and the new selector survives one redesign
         without re-authoring.
         """
+        def _scoped(c: str) -> str:
+            if not scope:
+                return c
+            if c == ".":
+                return scope
+            return f"{scope} >> {c}"
+
         if " | " not in raw:
-            return raw
+            return _scoped(raw)
         candidates = [c.strip() for c in raw.split(" | ")]
         for idx, c in enumerate(candidates):
+            sel = _scoped(c)
             try:
-                if self.get_count(c) > 0:
-                    log.info("Fallback selector: using %r (option %d/%d)", c, idx + 1, len(candidates))
-                    return c
+                if self.get_count(sel) > 0:
+                    log.info("Fallback selector: using %r (option %d/%d)", sel, idx + 1, len(candidates))
+                    return sel
             except Exception:
                 continue
-        return candidates[0]
+        return _scoped(candidates[0])
 
     # ------------------------------------------------------------------
     # Network / API surface (filled by the walker's network hook)

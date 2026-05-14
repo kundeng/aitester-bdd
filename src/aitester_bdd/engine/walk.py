@@ -94,20 +94,23 @@ def _topo_sort(rules_by_name: dict[str, "Rule"]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _eval_state_check(
-    browser: BrowserAdapter, sc: "StateCheck", *, timeout_ms: int
+    browser: BrowserAdapter, sc: "StateCheck", *, timeout_ms: int, scope: str = "",
 ) -> tuple[bool, str, str]:
     """Evaluate one StateCheck. Returns (passed, expected_repr, observed_repr).
 
     Selector-bearing kinds resolve the locator through `resolve_fallback_selector`
     first (ported from WISE) so `"a | b"` pipe-fallback works everywhere.
+    `scope` (TIER 2.5) prefixes the resolved selector with `<scope> >> ` so
+    that child rules of a scoped parent narrow their queries automatically.
     """
     kind = sc.kind
     css = sc.locator
     expected = sc.expected
     extra = sc.extra
 
-    # Resolve pipe-fallback selector once for selector-bearing kinds.
-    css_resolved = browser.resolve_fallback_selector(css) if css else css
+    # Resolve pipe-fallback selector once for selector-bearing kinds, with
+    # the inherited scope (if any) applied per-candidate.
+    css_resolved = browser.resolve_fallback_selector(css, scope) if css else css
 
     # ── URL ────────────────────────────────────────────────────────────
     if kind == "url_contains":
@@ -372,14 +375,20 @@ def _eval_api_returns(path: str, field: str, expected: str) -> tuple[bool, str, 
 # Actions
 # ---------------------------------------------------------------------------
 
-def _eval_action(browser: BrowserAdapter, action: "Action") -> None:
+def _eval_action(browser: BrowserAdapter, action: "Action", *, scope: str = "") -> None:
     """Execute one action against the live browser.
 
     Selector-bearing actions resolve the target through fallback resolution
-    (`"a | b"` pipe syntax) before dispatching.
+    (`"a | b"` pipe syntax) before dispatching. When `scope` is set
+    (TIER 2.5), the resolved target is prefixed with `<scope> >> ` so
+    child rules narrow under the parent's element.
+
+    Navigation actions (`open`) ignore scope — their target is a URL.
     """
     kind = action.kind
-    target = browser.resolve_fallback_selector(action.target) if action.target else action.target
+    # Don't apply scope to navigation actions; their target is a URL.
+    target_scope = "" if kind in ("open", "reload", "back") else scope
+    target = browser.resolve_fallback_selector(action.target, target_scope) if action.target else action.target
 
     if kind == "open":
         browser.open(target or action.target)
@@ -546,12 +555,15 @@ def _check_guards(
     guards: list["StateCheck"],
     *,
     registry: Any = None,
+    scope: str = "",
 ) -> tuple[bool, Optional["StateCheck"], str, str]:
     """Evaluate all guards. Returns (passed, failed_check_or_None, expected, observed).
 
     Dismisses interrupts once before checking. Each guard uses the short
     guard timeout (no significant waiting — guards are 'is the world already
-    in the right state?'). Fires `after_state_check` per guard.
+    in the right state?'). Fires `after_state_check` per guard. `scope`
+    (TIER 2.5) is applied to each guard's selector via the BrowserAdapter's
+    pipe-fallback resolver.
     """
     sels = _effective_interrupt_selectors(rule, verification)
     for sel in sels:
@@ -564,7 +576,9 @@ def _check_guards(
         except Exception:
             pass
     for g in guards:
-        ok, expected, observed = _eval_state_check(browser, g, timeout_ms=DEFAULT_GUARD_TIMEOUT_MS)
+        ok, expected, observed = _eval_state_check(
+            browser, g, timeout_ms=DEFAULT_GUARD_TIMEOUT_MS, scope=scope,
+        )
         if registry is not None:
             registry.fire_after_state_check(
                 rule, g, ok, expected, observed, position="guard",
@@ -587,6 +601,7 @@ def _execute_body(
     deadline: Optional[float] = None,
     scenario_name: str = "",
     registry: Any = None,
+    scope: str = "",
 ) -> tuple[bool, str, str, Optional["StateCheck | Action"], str, str]:
     """Execute the rule body — actions interleaved with inline state checks.
 
@@ -646,7 +661,7 @@ def _execute_body(
         if isinstance(step, StateCheck):
             # Inline observation gate / post-action assertion.
             ok, expected, observed = _eval_state_check(
-                browser, step, timeout_ms=DEFAULT_OBSERVATION_TIMEOUT_MS
+                browser, step, timeout_ms=DEFAULT_OBSERVATION_TIMEOUT_MS, scope=scope,
             )
             if registry is not None:
                 registry.fire_after_state_check(
@@ -674,7 +689,7 @@ def _execute_body(
         t0 = time.time()
         raised = False
         try:
-            _eval_action(browser, step)
+            _eval_action(browser, step, scope=scope)
             _await_after_action(browser, step)
         except Exception as exc_first:
             raised = True
@@ -682,7 +697,7 @@ def _execute_body(
             if interrupt_sels:
                 _dismiss(browser, interrupt_sels)
                 try:
-                    _eval_action(browser, step)
+                    _eval_action(browser, step, scope=scope)
                     _await_after_action(browser, step)
                     if registry is not None:
                         registry.fire_after_action(rule, step, time.time() - t0, raised)
@@ -718,8 +733,16 @@ def _walk_rule(
     run_deadline: Optional[float] = None,
     registry: Any = None,
     walk_log: Any = None,
+    scope: str = "",
 ) -> RuleResult:
-    """Walk one rule with full WISE semantics + aspect hooks."""
+    """Walk one rule with full WISE semantics + aspect hooks.
+
+    `scope` (TIER 2.5) is the CSS selector prefix this rule inherits from
+    its parent. Applied to every guard, action, observation, and
+    extraction in the rule's body. Children of this rule walk with
+    `rule.child_scope` (if explicitly declared) — otherwise they inherit
+    this same scope.
+    """
     from aitester_bdd.AITester import Action, StateCheck
 
     start = time.time()
@@ -770,7 +793,7 @@ def _walk_rule(
 
     # ── Guards (with retry-redo, ported from WISE) ────────────────────
     ok, failed_guard, expected, observed = _check_guards(
-        browser, rule, verification, guards, registry=registry,
+        browser, rule, verification, guards, registry=registry, scope=scope,
     )
     if not ok and rule.retry_max > 0:
         for attempt in range(1, rule.retry_max + 1):
@@ -788,10 +811,10 @@ def _walk_rule(
             _execute_body(
                 browser, rule, verification, body,
                 deadline=rule_deadline, scenario_name=scenario.name,
-                registry=registry,
+                registry=registry, scope=scope,
             )
             ok, failed_guard, expected, observed = _check_guards(
-                browser, rule, verification, guards, registry=registry,
+                browser, rule, verification, guards, registry=registry, scope=scope,
             )
             if ok:
                 break
@@ -831,7 +854,7 @@ def _walk_rule(
     passed, fk, fmsg, fitem, fexp, fobs = _execute_body(
         browser, rule, verification, body,
         deadline=rule_deadline, scenario_name=scenario.name,
-        registry=registry,
+        registry=registry, scope=scope,
     )
 
     if not passed:
@@ -878,7 +901,7 @@ def _walk_rule(
             log.warning("expansion failed for rule %r: %s", rule.name, exc)
     elif rule.has_capture:
         try:
-            record = _extract_record(browser, rule)
+            record = _extract_record(browser, rule, scope=scope)
             if record is not None:
                 record = _invoke_hooks_post_extract(verification, record)
                 _emit_to_artifacts(verification, rule, record, scenario)

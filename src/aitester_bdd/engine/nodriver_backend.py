@@ -571,18 +571,25 @@ class NodriverBackend:
     # Pipe-fallback selector — same contract as the rfbrowser backend
     # ------------------------------------------------------------------
 
-    def resolve_fallback_selector(self, raw: str) -> str:
+    def resolve_fallback_selector(self, raw: str, scope: str = "") -> str:
+        def _scoped(c: str) -> str:
+            if not scope:
+                return c
+            if c == ".":
+                return scope
+            return f"{scope} >> {c}"
         if " | " not in raw:
-            return raw
+            return _scoped(raw)
         candidates = [c.strip() for c in raw.split(" | ")]
         for idx, c in enumerate(candidates):
+            sel = _scoped(c)
             try:
-                if self.get_count(c) > 0:
-                    log.info("Fallback selector: using %r (option %d/%d)", c, idx + 1, len(candidates))
-                    return c
+                if self.get_count(sel) > 0:
+                    log.info("Fallback selector: using %r (option %d/%d)", sel, idx + 1, len(candidates))
+                    return sel
             except Exception:
                 continue
-        return candidates[0]
+        return _scoped(candidates[0])
 
     # ------------------------------------------------------------------
     # Network capture stubs (the walker uses these for last_status checks).

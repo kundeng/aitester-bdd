@@ -108,6 +108,128 @@ the most stable available attribute in this order:
 7. Stable class (no `Mui-...-12345`-style hash)
 8. Visible text via `:has-text("...")` — last resort
 
+### Selector anti-patterns and robust authoring
+
+The agent (you) **must avoid** these failure modes — they pass dryrun
+but break at run time:
+
+**Don't compound multiple Tailwind/utility classes.** When `browser_snapshot`
+shows `<div class="prose prose-sm dark:prose-invert break-words max-h-80
+overflow-hidden">`, **do NOT** author `div.prose.max-h-80` — `max-h-80`
+is conditional (only present when content is long+collapsed). Pick ONE
+distinctive class:
+
+| Bad | Why bad | Good |
+|-----|---------|------|
+| `div.prose.max-h-80` | `max-h-80` is conditional | `div.prose-sm` |
+| `button.bg-primary.rounded-2xl.px-4` | three Tailwind utilities; any may shift | `button[type=submit]` |
+| `div.flex.justify-end.gap-2.mt-4` | utility soup | `div.justify-end` (if distinctive) or just the inner content |
+
+If you don't know which class is conditional, **use containment**:
+`[class*="prose-sm"]` matches as long as `prose-sm` appears anywhere in
+the class list, robust to siblings being added/removed.
+
+**Prefer pipe-fallback when uncertain.** The runtime resolves
+`a | b | c` to "the first selector that matches on the live page" —
+use this when an element might be reachable via one of several
+attributes:
+
+```robot
+# data-testid preferred; fall back to a stable id, then a class
+When I click locator "[data-testid=submit-btn] | #submit | button.primary"
+
+# match either the old or new layout's user message bubble
+Then locator ".justify-end .bg-primary | [data-testid=user-msg]" contains "Hello"
+```
+
+Use this sparingly — every fallback is a maintenance hint that the
+selector is fragile. Prefer asking the SUT team to add a `data-testid`
+(write a **bug report** if testids are missing on a critical element).
+
+**Compound selectors are OK when they target uniquely.** `.justify-end
+.bg-primary.rounded-2xl` (parent + child class) is fine if both halves
+are stable. The anti-pattern is compounding *peer* Tailwind classes
+that may individually disappear.
+
+### A good selector is unique, robust, and scoped
+
+Three properties — they reinforce each other, none is optional:
+
+- **Unique.** Exactly one element matches (`count == 1`) for
+  click/type/observe targets. For table rows / list items, `count >= 1`.
+  A non-unique selector is the #1 source of false-pass + false-fail
+  flakiness — Playwright's `.first` masks the bug at runtime.
+- **Robust.** Keys on a stable attribute (`data-testid`, `aria-label`,
+  semantic role, `id`, `name`, `href`) rather than visual class soup
+  that shifts with theme/variant changes.
+- **Scoped.** When a selector isn't unique page-wide but IS unique
+  inside a card / panel / row, use `And I scope children to "${parent}"`
+  to narrow the context. Scoping turns "the second button" into
+  "the only button inside the case-detail card" — far more readable
+  and survives layout reflow.
+
+### Validate every selector before you write it
+
+Before you put a CSS selector into the `.robot` suite, call
+`browser_validate_selector(css, scope, expected)`. It runs the
+selector against the live page and returns:
+
+```
+{
+  "candidate": "<css under scope>",
+  "count": 1,
+  "expected": "unique",
+  "ok": true,
+  "stable_attrs": {"data-testid": "submit-btn"},
+  "classes": ["px-4", "py-2", "bg-blue-600"],
+  "text": "Submit"
+}
+```
+
+Read it like this:
+
+- `ok: false, count: 0` → selector doesn't match. Re-snapshot, the
+  element may not be rendered (add an `await`), or the spelling is
+  wrong.
+- `ok: false, count > 1` → not unique. The report's `suggestion` field
+  names a stable attribute to tighten to (e.g. `tighten to
+  [data-testid="submit-btn"]`). If no stable attr is available, add a
+  parent scope.
+- `warning: "selector is built only from Tailwind utility classes"` →
+  brittle. Replace with a semantic anchor.
+- For pipe-fallback (`a | b | c`), each candidate is validated
+  independently — the report is one entry per candidate.
+
+`expected` values:
+- `"unique"` (default) — for click, type, single-element observations
+- `"many"` — for table rows, list items, expansion targets
+- `"absent"` — for negation/disappearance asserts (`But selector ...
+  does not exist`)
+
+This is **fast** (one tool call per selector) and catches every
+"oops, that matches three things" mistake before the suite ships.
+
+### Post-authoring validate-refine pass (lightweight)
+
+After you've drafted the `.robot` body but BEFORE calling
+`write_robot_suite`, do a quick sanity sweep:
+
+1. For each selector you put in the suite, run
+   `browser_validate_selector` once more — confirm `ok: true`.
+2. If any selector now reports `ok: false` (state may have changed
+   during exploration), fix it in place: tighten the attribute, add
+   scope, or escalate to a bug report if the element is genuinely
+   missing.
+3. Only then call `write_robot_suite`. The runtime walker will
+   resolve pipe-fallbacks and scopes the same way the validator did,
+   so a green validation == a green run (modulo timing, which you
+   handle with `await=`).
+
+Keep the refinement minimal — this is a "second look" pass, not a
+rewrite. If a selector required more than one fix, that's a signal
+the underlying page contract is unstable and a bug report may be the
+right exit.
+
 ### Exploration-first rule (non-negotiable)
 
 Before you write a single selector in the suite, you must have driven

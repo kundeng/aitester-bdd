@@ -307,6 +307,16 @@ class Rule:
     emit_merge_on: dict[str, str] = field(default_factory=dict)
     # Parametric expansion (TIER 2)
     expansion: Optional[Expansion] = None
+    # Scope propagation to children (TIER 2.5).
+    # When set, child rules walk with CSS selectors prefixed by this scope.
+    # For expansion-elements this is set per-iteration automatically; for
+    # non-expansion structural rules ("I just opened a panel; children
+    # operate inside it") declare it via `And I scope children to "<css>"`.
+    child_scope: str = ""
+    # Walk-time-populated list of children (rules with `parents` including
+    # this rule). Computed at scenario start; never written by keyword
+    # library.
+    children: list = field(default_factory=list)
 
     @property
     def has_action(self) -> bool:
@@ -620,6 +630,32 @@ class AITester:
     def set_rule_timeout(self, ms: str) -> None:
         """Per-rule deadline; rule fails if body exceeds it."""
         self._current_rule().options["timeout_ms"] = str(int(ms))
+
+    @keyword("And I scope children to \"${css}\"")
+    def set_child_scope(self, css: str) -> None:
+        """Designate a CSS scope that this rule's children inherit.
+
+        Every selector in child rules (state checks, actions, extractions)
+        will be prefixed with `${css} >> ` at walk time — narrowing
+        queries to that subtree. Makes selectors robust against
+        unrelated DOM changes elsewhere on the page.
+
+        Example:
+            I define rule "open_case_panel"
+                When I click locator "a.case-row >> nth=0"
+                And selector "[data-testid=case-detail-root]" exists
+                And I scope children to "[data-testid=case-detail-root]"
+
+            I define rule "verify_chat_renders"
+                And I declare parents "open_case_panel"
+                # `[data-testid=chat-input]` here resolves to
+                # `[data-testid=case-detail-root] >> [data-testid=chat-input]`
+                And selector "[data-testid=chat-input]" exists
+
+        Combine with `expand over elements` for parametric per-row child
+        walks — expansion sets per-iteration scope automatically.
+        """
+        self._current_rule().child_scope = _strip_quotes(css)
 
     @keyword("And I screenshot on enter")
     def screenshot_on_enter(self) -> None:

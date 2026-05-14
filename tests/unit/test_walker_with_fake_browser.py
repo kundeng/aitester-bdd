@@ -78,20 +78,31 @@ class FakeBrowser:
         if state in ("attached", "visible"):
             return present
         return not present
-    def resolve_fallback_selector(self, raw: str) -> str:
+    def resolve_fallback_selector(self, raw: str, scope: str = "") -> str:
         """Honor the pipe-fallback in tests: pick the first candidate that
         the FakeBrowser actually has live (count > 0 or present-True or
-        non-empty text), mirroring the real BrowserAdapter behavior."""
+        non-empty text), mirroring the real BrowserAdapter behavior.
+
+        Scope is composed in front via `>>` to mirror the real adapter."""
+        if raw.strip() == "." and scope:
+            return scope
         if " | " not in raw:
-            return raw
+            return f"{scope} >> {raw}" if scope else raw
         for c in (s.strip() for s in raw.split(" | ")):
+            candidate = f"{scope} >> {c}" if scope else c
             if (
-                self.selector_present.get(c, False)
-                or self.count_for.get(c, 0) > 0
-                or self.text_for.get(c, "")
+                self.selector_present.get(candidate, False)
+                or self.count_for.get(candidate, 0) > 0
+                or self.text_for.get(candidate, "")
+                or (not scope and (
+                    self.selector_present.get(c, False)
+                    or self.count_for.get(c, 0) > 0
+                    or self.text_for.get(c, "")
+                ))
             ):
-                return c
-        return raw.split(" | ")[0].strip()
+                return candidate
+        first = raw.split(" | ")[0].strip()
+        return f"{scope} >> {first}" if scope else first
     def set_stepper(self, selector: str, count: int) -> None:
         for _ in range(count):
             self.actions_called.append(("set_stepper", selector))
