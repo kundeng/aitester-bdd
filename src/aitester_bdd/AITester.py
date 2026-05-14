@@ -681,13 +681,20 @@ class AITester:
     def then_url_contains(self, pattern: str) -> None:
         self._current_rule().items.append(StateCheck("url_contains", expected=_strip_quotes(pattern)))
 
+    def _url_matches(self, pattern: str) -> None:
+        self._current_rule().items.append(StateCheck("url_matches", expected=_strip_quotes(pattern)))
+
     @keyword("Given url matches \"${pattern}\"")
     def given_url_matches(self, pattern: str) -> None:
-        self._current_rule().items.append(StateCheck("url_matches", expected=_strip_quotes(pattern)))
+        self._url_matches(pattern)
+
+    @keyword("And url matches \"${pattern}\"")
+    def and_url_matches(self, pattern: str) -> None:
+        self._url_matches(pattern)
 
     @keyword("Then url matches \"${pattern}\"")
     def then_url_matches(self, pattern: str) -> None:
-        self._current_rule().items.append(StateCheck("url_matches", expected=_strip_quotes(pattern)))
+        self._url_matches(pattern)
 
     def _url_does_not_contain(self, pattern: str) -> None:
         """Internal helper — Grammar particles But/And/Then route here."""

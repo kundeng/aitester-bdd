@@ -400,8 +400,8 @@ The full keyword surface for state checks:
 | Keyword | Meaning |
 |---|---|
 | `Given/And/Then url contains "${pattern}"` | URL substring match |
-| `Given/Then url matches "${regex}"` | URL regex match |
-| `But url does not contain "${pattern}"` | Negative URL match |
+| `Given/And/Then url matches "${regex}"` | URL regex match — only use if a substring isn't enough |
+| `But/And/Then url does not contain "${pattern}"` | Negative URL match |
 
 **Element existence**
 | Keyword | Meaning |

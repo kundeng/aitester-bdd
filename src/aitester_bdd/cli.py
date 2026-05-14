@@ -42,6 +42,10 @@ def author(
              "from the suite and sets AITESTER_BROWSER accordingly.",
     ),
     max_iters: int = typer.Option(40, "--max-iters", help="Max agent iterations before giving up."),
+    debug: bool = typer.Option(
+        False, "--debug", "-d",
+        help="Stream each agent step (tool calls + results) to stderr so you can watch the explorer work.",
+    ),
 ) -> None:
     """Run the authoring agent loop.
 
@@ -75,6 +79,7 @@ def author(
         source_root=src_root,
         engine=engine,
         max_iters=max_iters,
+        debug=debug,
     )
 
     if result.suite_path:

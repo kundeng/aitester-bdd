@@ -131,6 +131,7 @@ def author_with_agent(
     source_root: Optional[Path] = None,
     engine: str = "agent-browser",
     max_iters: int = DEFAULT_MAX_ITERS,
+    debug: bool = False,
 ) -> AuthoringResult:
     """Run the authoring agent loop.
 
@@ -187,10 +188,13 @@ def author_with_agent(
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": max_iters * 4}
 
     try:
-        result = agent.invoke(
-            {"messages": [{"role": "user", "content": user_message}]},
-            config=config,
-        )
+        if debug:
+            result = _invoke_with_debug_stream(agent, user_message, config)
+        else:
+            result = agent.invoke(
+                {"messages": [{"role": "user", "content": user_message}]},
+                config=config,
+            )
     except Exception as exc:
         log.exception("agent loop failed")
         return AuthoringResult(
@@ -220,6 +224,91 @@ def author_with_agent(
         final_message=final_message,
         transcript=transcript,
     )
+
+
+# ─── Debug streaming ─────────────────────────────────────────────────
+
+
+def _short(s, n: int = 120) -> str:
+    if s is None:
+        return ""
+    s = str(s).replace("\n", " ⏎ ")
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def _invoke_with_debug_stream(agent, user_message: str, config: dict) -> dict:
+    """Stream the agent loop to stderr — one line per agent turn.
+
+    Format:
+      [step N] AI: <preview of model text>
+      [step N]    ↪ tool browser_validate_selector(css='...', scope='', ...)
+      [step N]    ← tool_result (ok=True, count=1, ...)
+
+    Lets the operator watch the explorer:
+      - what the model says it's about to do
+      - which tool it picks + key args
+      - the tool's response (truncated)
+    Result shape matches `agent.invoke` so the caller can keep using
+    `result["messages"]`.
+    """
+    import sys
+
+    print("[author/debug] streaming agent loop to stderr", file=sys.stderr)
+    print("[author/debug] " + "─" * 60, file=sys.stderr)
+
+    final_state: dict = {}
+    step = 0
+    seen_ids: set[str] = set()
+
+    for chunk in agent.stream(
+        {"messages": [{"role": "user", "content": user_message}]},
+        config=config,
+        stream_mode="values",
+    ):
+        final_state = chunk
+        messages = chunk.get("messages", []) if isinstance(chunk, dict) else []
+        # Print only messages we haven't logged yet (id-based dedup).
+        for m in messages:
+            mid = getattr(m, "id", None) or id(m)
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            kind = type(m).__name__
+            if kind in ("HumanMessage", "SystemMessage"):
+                # User/system prompts — log once, briefly.
+                txt = _short(getattr(m, "content", ""), 200)
+                print(f"[author/debug] {kind}: {txt}", file=sys.stderr)
+                continue
+            step += 1
+            if kind == "AIMessage":
+                content = getattr(m, "content", "") or ""
+                if content:
+                    print(f"[author/debug] step {step} AI: {_short(content, 200)}", file=sys.stderr)
+                for tc in (getattr(m, "tool_calls", None) or []):
+                    name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "?")
+                    args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
+                    # Show 2-3 most useful args; full args dict can be huge.
+                    arg_preview = ", ".join(
+                        f"{k}={_short(v, 60)!r}" for k, v in list((args or {}).items())[:3]
+                    )
+                    print(
+                        f"[author/debug] step {step}   ↪ {name}({arg_preview})",
+                        file=sys.stderr,
+                    )
+            elif kind == "ToolMessage":
+                tname = getattr(m, "name", "?")
+                content = _short(getattr(m, "content", ""), 200)
+                print(
+                    f"[author/debug] step {step}   ← {tname}: {content}",
+                    file=sys.stderr,
+                )
+            else:
+                content = _short(getattr(m, "content", ""), 120)
+                print(f"[author/debug] step {step} {kind}: {content}", file=sys.stderr)
+
+    print("[author/debug] " + "─" * 60, file=sys.stderr)
+    print(f"[author/debug] loop done in {step} steps", file=sys.stderr)
+    return final_state
 
 
 # ─── Utilities ───────────────────────────────────────────────────────
