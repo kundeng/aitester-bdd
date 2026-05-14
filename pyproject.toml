@@ -23,7 +23,17 @@ classifiers = [
 dependencies = [
     "robotframework>=7.0",
     "robotframework-browser>=18.0",
+    # In-walker semantic / visual_semantic escape hatch (one-shot LLM call,
+    # no tools needed at run time) — keep litellm as the simple multi-provider
+    # client.
     "litellm>=1.50",
+    # Authoring-time agent loop — same pattern as prismi3's aitester.
+    # DeepAgents wraps langgraph and gives us a ready-made tool-calling
+    # ReAct loop; we don't roll our own.
+    "deepagents>=0.0.15",
+    "langgraph>=0.2.50",
+    "langchain>=0.3",
+    "langchain-openai>=0.2",
     "pydantic>=2.0",
     "typer>=0.12",
     "pyyaml>=6.0",

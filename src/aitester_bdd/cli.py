@@ -1,9 +1,9 @@
-"""aitester CLI — entrypoints for discover / author / refine / run.
+"""aitester CLI — author / run / doctor.
 
-    aitester author --story "..." --base-url http://localhost:5173
-    aitester discover --base-url http://localhost:5173 [--source-root /path]
-    aitester run path/to/suite.robot
-    aitester version
+  aitester author --story "..." --base-url http://localhost:5173
+  aitester run path/to/suite.robot
+  aitester doctor
+  aitester version
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import typer
 
 app = typer.Typer(
     name="aitester",
-    help="LLM-driven BDD test authoring for Robot Framework.",
+    help="Agent-loop authoring of Robot Framework BDD test suites.",
     no_args_is_help=True,
 )
 
@@ -29,52 +29,48 @@ def version() -> None:
 
 
 @app.command()
-def discover(
-    base_url: str = typer.Option(..., "--base-url", "-u", help="URL of the target app"),
-    source_root: str | None = typer.Option(None, "--source-root", help="Source root for white-box discovery"),
-    out: str | None = typer.Option(None, "--out", help="Write the draft suite to this path"),
-    story: str = typer.Option("explore the app", "--story", help="Optional story hint"),
-) -> None:
-    """Discover testable journeys (black-box snapshot + optional white-box source scan)."""
-    from aitester_bdd.discovery.blackbox import discover_blackbox
-    from aitester_bdd.discovery.whitebox import discover_whitebox
-
-    typer.echo(f"[discover] base_url={base_url}")
-    bb = discover_blackbox(base_url, story)
-    typer.echo(
-        f"  black-box: snapshot bytes={len(bb.snapshot)} buttons={len(bb.found_buttons)} "
-        f"inputs={len(bb.found_inputs)} routes={len(bb.found_routes)} login={bb.has_login_form}"
-    )
-    if source_root:
-        wb = discover_whitebox(source_root)
-        typer.echo(
-            f"  white-box: backend_routes={len(wb.backend_routes)} testids={len(wb.frontend_testids)}"
-        )
-        for note in wb.notes:
-            typer.echo(f"    note: {note}")
-    target = Path(out) if out else Path("draft.robot")
-    target.write_text(bb.draft_robot)
-    typer.echo(f"  wrote draft: {target}")
-
-
-@app.command()
 def author(
-    story: str = typer.Option(..., "--story", "-s", help="Plain-English test intention"),
-    base_url: str = typer.Option(..., "--base-url", "-u", help="URL of the target app"),
-    out: str = typer.Option("suite.robot", "--out", "-o"),
-    max_iters: int = typer.Option(3, "--max-iters", help="Max refine iterations on dryrun fail"),
+    story: str = typer.Option(..., "--story", "-s", help="Plain-English intention to verify."),
+    base_url: str = typer.Option(..., "--base-url", "-u", help="URL of the live target app."),
+    out: str = typer.Option("suite.robot", "--out", "-o", help="Output path for the .robot suite."),
+    triage_dir: str = typer.Option("triage", "--triage-dir", help="Directory for bug reports when authoring is blocked."),
+    source_root: str | None = typer.Option(None, "--source-root", help="Optional source root for white-box read_file access."),
+    max_iters: int = typer.Option(40, "--max-iters", help="Max agent iterations before giving up."),
 ) -> None:
-    """Author a .robot suite from a story + live app, refine-on-dryrun-fail."""
-    from aitester_bdd.authoring.author import author_with_loop
-    from aitester_bdd.llm.aiagent_adapter import AIAgentLLM
+    """Run the authoring agent loop.
 
-    llm = AIAgentLLM()
+    The agent drives the live target via agent-browser (per SKILL.md),
+    then either writes the .robot suite or files a bug report.
+    """
+    from aitester_bdd.authoring.agent_loop import author_with_agent
+
+    suite_path = Path(out)
+    triage_path = Path(triage_dir)
+    src_root = Path(source_root) if source_root else None
+
     typer.echo(f"[author] story={story!r}")
-    suite_path, suite, history = author_with_loop(
-        story=story, base_url=base_url, llm=llm, max_iters=max_iters,
+    typer.echo(f"[author] base_url={base_url}")
+    typer.echo(f"[author] suite_path={suite_path}, triage_dir={triage_path}")
+    if src_root:
+        typer.echo(f"[author] source_root={src_root}")
+
+    result = author_with_agent(
+        story=story,
+        base_url=base_url,
+        suite_path=suite_path,
+        bug_report_dir=triage_path,
+        source_root=src_root,
+        max_iters=max_iters,
     )
-    Path(out).write_text(suite)
-    typer.echo(f"  wrote {out} ({len(suite.splitlines())} lines, {len(history)} iter(s))")
+
+    if result.suite_path:
+        typer.echo(f"[author] ✓ wrote suite: {result.suite_path}")
+    elif result.bug_report_path:
+        typer.echo(f"[author] ! filed bug report: {result.bug_report_path}")
+    else:
+        typer.echo(f"[author] ✗ agent did not reach a terminal call in {result.iterations} steps")
+        typer.echo(f"  final message: {result.final_message[:300]}")
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -82,7 +78,7 @@ def run(
     suite: str = typer.Argument(..., help="Path to a .robot suite"),
     base_url: str | None = typer.Option(None, "--base-url", help="Override BASE_URL variable"),
 ) -> None:
-    """Run a .robot suite via Robot Framework."""
+    """Run a .robot suite via Robot Framework (no LLM in the loop)."""
     cmd = [sys.executable, "-m", "robot"]
     if base_url:
         cmd.extend(["--variable", f"BASE_URL:{base_url}"])
@@ -107,24 +103,29 @@ def doctor() -> None:
         typer.echo(f"  ✗ robotframework-browser: {e} (run `rfbrowser init` after install)")
     try:
         import importlib.metadata
-        import litellm  # noqa: F401
-        try:
-            v = importlib.metadata.version("litellm")
-        except importlib.metadata.PackageNotFoundError:
-            v = "?"
-        typer.echo(f"  ✓ litellm {v}")
+        for pkg in ("deepagents", "langgraph", "langchain", "langchain-openai", "litellm"):
+            try:
+                v = importlib.metadata.version(pkg)
+                typer.echo(f"  ✓ {pkg} {v}")
+            except importlib.metadata.PackageNotFoundError:
+                typer.echo(f"  ✗ {pkg} not installed")
     except Exception as e:
-        typer.echo(f"  ✗ litellm: {e}")
+        typer.echo(f"  ✗ {e}")
     model = os.environ.get("AITESTER_LLM_MODEL")
+    base = os.environ.get("OPENAI_BASE_URL")
     if model:
         typer.echo(f"  ✓ AITESTER_LLM_MODEL={model}")
     else:
-        typer.echo("  ~ AITESTER_LLM_MODEL not set (required for authoring + semantic checks)")
+        typer.echo("  ~ AITESTER_LLM_MODEL not set (default: cc/claude-opus-4-7)")
+    if base:
+        typer.echo(f"  ✓ OPENAI_BASE_URL={base}")
+    else:
+        typer.echo("  ~ OPENAI_BASE_URL not set (default: http://localhost:20128/v1)")
     try:
         r = subprocess.run(["agent-browser", "--version"], capture_output=True, text=True, timeout=5)
         typer.echo(f"  ✓ agent-browser {r.stdout.strip() or r.stderr.strip()}")
     except FileNotFoundError:
-        typer.echo("  ✗ agent-browser CLI not found (required for discovery + snapshots)")
+        typer.echo("  ✗ agent-browser CLI not found (required for the agent loop)")
 
 
 if __name__ == "__main__":
