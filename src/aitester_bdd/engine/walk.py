@@ -21,6 +21,7 @@ import re
 import time
 from typing import TYPE_CHECKING
 
+from aitester_bdd.engine.browser import BrowserAdapter
 from aitester_bdd.engine.verdict import RuleResult, Verdict
 
 if TYPE_CHECKING:
@@ -346,8 +347,6 @@ def _walk_rule(
 
 def walk_verification(verification: "Verification") -> Verdict:
     """Walk all scenarios in a Verification; return a Verdict."""
-    from aitester_bdd.engine.browser import BrowserAdapter
-
     verdict = Verdict(verification_name=verification.name)
     browser = BrowserAdapter()
     browser.new_session(headless=True)
