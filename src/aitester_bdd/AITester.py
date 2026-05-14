@@ -444,7 +444,16 @@ class AITester:
         )
 
     # ------------------------------------------------------------------
-    # State Checks — Semantic (AI-judged)
+    # State Checks — Semantic (AI-judged escape hatch)
+    #
+    # Use sparingly — deterministic checks (text/count/exists) are
+    # cheaper, faster, and more reliable. These are for cases that
+    # genuinely need AI-level judgment (semantic meaning of text,
+    # visual recognition).
+    #
+    # Requires AITESTER_LLM_MODEL env to opt in. Without it, the
+    # walker fails the check with a "not configured" message rather
+    # than silently passing.
     # ------------------------------------------------------------------
 
     @keyword("Then content of locator \"${css}\" semantically matches \"${prompt}\"")
@@ -457,6 +466,15 @@ class AITester:
     def then_semantic_page(self, prompt: str) -> None:
         self._current_rule().items.append(
             StateCheck("semantic", expected=_strip_quotes(prompt), extra={"scope": "page"})
+        )
+
+    @keyword("Then screenshot semantically matches \"${prompt}\"")
+    def then_visual_semantic(self, prompt: str) -> None:
+        """Take a screenshot and ask the LLM if it satisfies the criterion.
+        Use only when text-level checks can't express the assertion
+        (visual layout, chart shape, image content, etc.)."""
+        self._current_rule().items.append(
+            StateCheck("visual_semantic", expected=_strip_quotes(prompt))
         )
 
     # ------------------------------------------------------------------

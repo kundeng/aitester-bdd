@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -105,11 +106,20 @@ def doctor() -> None:
     except Exception as e:
         typer.echo(f"  ✗ robotframework-browser: {e} (run `rfbrowser init` after install)")
     try:
-        import importlib
-        importlib.import_module("AIAgent")
-        typer.echo("  ✓ robotframework-aiagent")
-    except Exception:
-        typer.echo("  ~ robotframework-aiagent not installed (will use httpx OpenAI-compat fallback)")
+        import importlib.metadata
+        import litellm  # noqa: F401
+        try:
+            v = importlib.metadata.version("litellm")
+        except importlib.metadata.PackageNotFoundError:
+            v = "?"
+        typer.echo(f"  ✓ litellm {v}")
+    except Exception as e:
+        typer.echo(f"  ✗ litellm: {e}")
+    model = os.environ.get("AITESTER_LLM_MODEL")
+    if model:
+        typer.echo(f"  ✓ AITESTER_LLM_MODEL={model}")
+    else:
+        typer.echo("  ~ AITESTER_LLM_MODEL not set (required for authoring + semantic checks)")
     try:
         r = subprocess.run(["agent-browser", "--version"], capture_output=True, text=True, timeout=5)
         typer.echo(f"  ✓ agent-browser {r.stdout.strip() or r.stderr.strip()}")

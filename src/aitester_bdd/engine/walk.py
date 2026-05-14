@@ -215,11 +215,122 @@ def _eval_state_check(
     if kind == "api_returns":
         return _eval_api_returns(extra.get("path", ""), extra.get("field", ""), expected)
 
-    # ── Semantic (AI-judged) — stub
+    # ── Semantic (AI-judged) — escape hatch via the LLM adapter
     if kind == "semantic":
-        return (True, "semantic (stub)", "passed without judging")
+        return _eval_semantic(browser, sc)
+    if kind == "visual_semantic":
+        return _eval_visual_semantic(browser, sc)
 
     return (False, f"unknown state check {kind}", "")
+
+
+# ---------------------------------------------------------------------------
+# Semantic / visual_semantic — sparingly used, opt-in by env config.
+#
+# AITESTER_LLM_MODEL must be set (e.g. "openai/gpt-4o-mini") and the
+# matching provider credentials in env. If unset, the check fails with
+# a clear "not configured" message instead of silently passing.
+# ---------------------------------------------------------------------------
+
+
+_UNSET = object()
+_LLM_CACHE: object = _UNSET
+
+
+def _get_llm():
+    """Lazy-load the LLM adapter; returns None if not configured."""
+    global _LLM_CACHE
+    if _LLM_CACHE is not _UNSET:
+        return _LLM_CACHE
+    import os
+
+    if not os.environ.get("AITESTER_LLM_MODEL"):
+        _LLM_CACHE = None
+        return None
+    try:
+        from aitester_bdd.llm.aiagent_adapter import AIAgentLLM
+        _LLM_CACHE = AIAgentLLM()
+    except Exception as exc:
+        log.warning("LLM adapter init failed: %s", exc)
+        _LLM_CACHE = None
+    return _LLM_CACHE
+
+
+def reset_llm_cache() -> None:
+    """Reset lazy LLM cache — used by tests to inject mocks."""
+    global _LLM_CACHE
+    _LLM_CACHE = _UNSET
+
+
+def _eval_semantic(browser: BrowserAdapter, sc: "StateCheck") -> tuple[bool, str, str]:
+    """Text-mode semantic check. Pages text → LLM judge → pass/fail."""
+    criterion = sc.expected
+    llm = _get_llm()
+    if llm is None:
+        return (
+            False, f"semantic({criterion!r})",
+            "AI judge not configured — set AITESTER_LLM_MODEL to opt in",
+        )
+
+    # Build the observation: URL + scoped text.
+    url = browser.url()
+    if sc.extra.get("scope") == "locator" and sc.locator:
+        css = browser.resolve_fallback_selector(sc.locator)
+        text = browser.get_text(css)
+        observation = f"URL: {url}\nScope: {sc.locator!r}\n---\n{text}"
+    else:
+        text = browser.get_text("body")
+        observation = f"URL: {url}\n---\n{text}"
+
+    try:
+        passed = llm.judge(criterion=criterion, observation=observation)
+    except Exception as exc:
+        return (False, f"semantic({criterion!r})", f"judge raised: {exc}")
+    return (
+        passed,
+        f"semantic({criterion!r})",
+        "PASS" if passed else "FAIL",
+    )
+
+
+def _eval_visual_semantic(
+    browser: BrowserAdapter, sc: "StateCheck",
+) -> tuple[bool, str, str]:
+    """Multimodal semantic check: PNG screenshot → LLM judge → pass/fail."""
+    criterion = sc.expected
+    llm = _get_llm()
+    if llm is None:
+        return (
+            False, f"visual_semantic({criterion!r})",
+            "AI judge not configured — set AITESTER_LLM_MODEL to opt in",
+        )
+
+    # Take a screenshot to a temp file, then read its bytes.
+    import os
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        shot_path = f.name
+    try:
+        browser.screenshot(shot_path)
+        with open(shot_path, "rb") as fh:
+            png_bytes = fh.read()
+        if not png_bytes:
+            return (False, f"visual_semantic({criterion!r})", "empty screenshot")
+        try:
+            passed = llm.judge_visual(criterion=criterion, png_bytes=png_bytes)
+        except Exception as exc:
+            return (False, f"visual_semantic({criterion!r})", f"judge raised: {exc}")
+        return (
+            passed,
+            f"visual_semantic({criterion!r})",
+            "PASS" if passed else "FAIL",
+        )
+    finally:
+        try:
+            os.unlink(shot_path)
+        except Exception:
+            pass
 
 
 def _eval_api_returns(path: str, field: str, expected: str) -> tuple[bool, str, str]:
