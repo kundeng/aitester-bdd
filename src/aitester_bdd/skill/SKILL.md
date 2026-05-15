@@ -35,19 +35,19 @@ Do not use when: there's no live target to drive (no URL); the user is hand-writ
 
 | Phase | What you do | Tool |
 |-------|-------------|------|
-| Orient | Confirm env: RF, Playwright explorer chromium, LLM config. If missing, run `aitester init-browser`. | `aitester doctor` |
-| Explore | Drive the **live target** via the Playwright `browser_*` tools. Log in if needed, navigate the pages the story passes through, take a `browser_snapshot` at each step. Record selectors you can prove exist. | `browser_open / browser_snapshot / browser_click / browser_type / ...` |
-| Author | Write `suite.robot` using ONLY the keywords in § 4. Every selector must come from an attribute in a `browser_snapshot` you took. Declare `${ENGINE}` in `*** Variables ***`. | `write_robot_suite` tool |
+| Orient | Confirm env: RF + `agent-browser` CLI on PATH + LLM config. | `aitester doctor` |
+| Explore | Drive the **live target** via the `agent-browser` CLI through `execute` (bash). Log in if needed, navigate the pages the story passes through, snapshot each. Record selectors you can prove exist. | `execute "agent-browser ..."` |
+| Author | Write `suite.robot` using ONLY the keywords in § 4. Every selector must come from an attribute observed on the live page. Declare `${ENGINE}` in `*** Variables ***`. | `write_robot_suite` |
 | Review | `robot --dryrun` must pass cleanly. Fix any unknown-keyword / arg-shape errors. | `robot --dryrun suite.robot` |
-| Refine | If a real run fails, re-explore the failing step via `browser_*` tools, patch the suite. | `browser_*` + edit |
+| Refine | If a real run fails, re-explore the failing step via `agent-browser`, patch the suite. | `execute` + edit |
 | Ship | Hand `suite.robot` to the user. They run `robot suite.robot` without you. | — |
 
 ### One explorer, three runtime backends
 
-**Exploration is Playwright only.** That's the only browser dialect
-that exposes real CSS-grounded attributes natively. Authoring drives
-Playwright sync API via the tools listed below; every selector in the
-authored suite comes from a real `browser_snapshot` entry.
+**Exploration is via the `agent-browser` CLI** — drive it through bash
+(`execute "agent-browser <subcmd> --json"`). The CLI maintains a
+persistent session for this authoring run; chain commands with `&&` to
+batch related steps.
 
 **Run-time backend is your choice, declared in the suite.** All three
 runtime backends accept CSS selectors, so the same authored `.robot`
@@ -59,74 +59,74 @@ ${ENGINE}    agent-browser   # or "playwright" or "nodriver"
 ```
 
 `aitester run` reads `${ENGINE}` and sets `AITESTER_BROWSER` so the
-walker picks the matching backend.
+walker picks the matching backend. Picking a backend doesn't change
+the authored suite. CSS is the lingua franca of all three.
 
-| `${ENGINE}` value | When to pick | Run-time setup needed |
-|-------------------|--------------|------------------------|
-| `agent-browser` (default for new suites) | Zero install at run time. CLI ships its own browser. | None at run time. |
-| `playwright` | Action-heavy tests where in-process Playwright is faster than subprocess-per-call. | `aitester init-browser` once. |
-| `nodriver` | Sites with bot detection (DataDome / Cloudflare BM / etc.) that fingerprint Playwright. | `pip install aitester-bdd[stealth]` + Edge/Chrome on the system. |
+### Explorer — the `agent-browser` CLI via Bash
 
-Picking a backend doesn't change the authored suite. If a test passes
-against one runtime but fails on another, that's a real cross-driver
-DOM-view bug worth filing. CSS is the lingua franca of all three.
+Your eyes and hands during Explore. Use the `execute` tool (bash)
+to call `agent-browser` directly. Chain with `&&` to batch related
+steps in a single shell call — way fewer LLM round-trips than one
+tool per operation.
 
-### Explorer tool reference (agent-browser backed)
+```bash
+# Navigate + snapshot in one shell call
+agent-browser open http://localhost:5173 && agent-browser snapshot -c -i --json
 
-Your eyes and hands during Explore. The explorer drives the
-`agent-browser` CLI under a single persistent session. The big
-difference from a raw DOM explorer: `browser_snapshot` returns a
-**tight accessibility tree** with `@ref` markers, and `browser_find`
-lets you act on elements by their accessible **role + name** without
-synthesizing CSS at all. CSS only appears at suite-write time when
-you `browser_get_attr(@ref, 'data-testid')` to materialize a stable
-attribute for the `.robot` file.
+# Probe a candidate selector
+agent-browser get count '[data-testid="case-row"]' --json
+agent-browser get attr '@e3' 'data-testid' --json
+agent-browser get text '.justify-end .rounded-2xl' --json
 
-| Tool | Purpose |
-|------|---------|
-| `browser_open(url)` | Navigate. Persistent session. |
-| `browser_snapshot(scope='')` | **Your source of truth.** Returns an a11y tree like `- button "Sign in" [ref=e3]` with role + name + ephemeral `@ref` per interactive element. Optionally scope to a CSS selector (e.g. `'.chat-panel'`) to keep the tree tight. Call after every navigation or state change. `@refs` last only until the next snapshot. |
-| `browser_find(locator, value, action, name='', text='')` | Playwright-style locate-then-act in one call. `locator ∈ {role, text, label, placeholder, alt, title, testid}`, `action ∈ {click, fill, type, hover, focus, check, uncheck, get_text, get_count}`. Examples: `find role textbox fill --name 'Username' --text 'admin'`, `find role button click --name 'Sign in'`, `find testid chat-input click`. **Use this instead of writing CSS during exploration.** |
-| `browser_click(target)` | Click by `@ref` or CSS. |
-| `browser_fill(target, text)` | Clear + fill an input. `@ref` or CSS. |
-| `browser_press(key)` | Press a key (Enter, Tab, Escape, Control+a, ArrowDown, ...) on the focused element. |
-| `browser_get(what, target='')` | Read state: `what ∈ {text, html, value, count, url, title}`. `target` is `@ref` or CSS (ignored for url/title). |
-| `browser_get_attr(target, name)` | **Your ref→CSS bridge.** Resolve an `@ref` (or CSS) to a single DOM attribute (`data-testid`, `aria-label`, `id`, `name`, `placeholder`, `href`). Returns `''` when unset. Call this for the highest-priority stable attribute and emit it in the suite. |
-| `browser_wait(target)` | Wait for a CSS selector to attach/become visible OR sleep N ms (string `"5000"`). Use this for SSE streams, late-rendered tool cards, transitions — NEVER use a raw timing trick. |
-| `browser_validate_selector(css, scope='', expected='unique')` | Confirm the selector against the live page before writing it. Returns count + ok + suggestion + brittleness warning. |
-| `browser_screenshot(path)` | Save PNG. |
-| `read_file(path)` | (white-box mode only) Read a source file under the configured source_root — useful for finding `data-testid` declarations or route mounts in the source code. |
+# Locate-and-act in one Playwright-style call (no CSS synthesis)
+agent-browser find role textbox --name "Username" fill admin
+agent-browser find role button --name "Sign in" click
+
+# Wait for an element to appear OR ms-sleep
+agent-browser wait '[data-testid="chat-input"]'
+agent-browser wait 2000
+
+# Free-form JS escape hatch
+agent-browser eval '() => document.title'
+```
+
+The CLI returns a JSON envelope (`{success, data, error}`) with the
+`--json` flag. `snapshot -c -i` gives a compact a11y tree with `@ref`
+markers (`- button "Sign in" [ref=e3]`). The accessible **name** is
+the visible label / aria-label / placeholder — **not** the HTML `name`
+attribute. To get the HTML `name` attribute, use
+`agent-browser get attr '@e3' 'name'`.
+
+**Session is pinned automatically** via `AGENT_BROWSER_SESSION` in the
+env — every shell call shares the same browser, cookies, and storage.
 
 ### Authoring workflow — refs during explore, CSS at write
 
-The exploration phase is **ref-first** because refs and role+name
-locators give you intent-grounded interaction with zero CSS
-synthesis. The suite is **CSS-only** because the runtime backends
-all accept CSS:
+The exploration phase is **ref-first** — `agent-browser find role/text/...`
+acts by intent, zero CSS synthesis. The suite is **CSS-only** because
+the runtime backends all accept CSS:
 
-1. `browser_open(url)` → navigate
-2. `browser_snapshot()` → get the a11y tree + `@refs`
-3. `browser_find(...)` OR `browser_click(@ref)` / `browser_fill(@ref, ...)` — act by intent
-4. After each action, `browser_snapshot()` again — state changed, refs renumbered
+1. `agent-browser open <url>` → navigate
+2. `agent-browser snapshot -c -i --json` → get the a11y tree + `@refs`
+3. `agent-browser find role textbox --name "Username" fill admin` — act by intent
+4. After each action, snapshot again — state changed, refs renumbered
 5. When you know which element each rule will target:
-   - `browser_get_attr(@ref, 'data-testid')` — first choice
-   - If empty: `browser_get_attr(@ref, 'aria-label')` → `'id'` (if not auto-generated) → `'name'` → `'placeholder'`
+   - `agent-browser get attr '@e3' 'data-testid'` — first choice
+   - If empty: try `aria-label`, `id` (if not auto-generated), `name`, `placeholder`
    - Emit the best as CSS in the suite (`[data-testid="..."]`, `[aria-label="..."]`, etc.)
-6. `browser_validate_selector(<css>, expected=...)` for each — confirm `ok: true`
-7. Only then `write_robot_suite(...)`
-
-This pattern keeps exploration cheap (refs + intent are short) and
-the suite portable (CSS runs on every backend).
+6. `agent-browser get count '<css>'` — confirm exactly 1 match for click/type targets
+7. Only then call `write_robot_suite(...)`
 
 ### Selectors
 
-Pick what's in the snapshot — `data-testid`, `aria-label`, `id`,
-`name`, `placeholder`, stable class, text. Don't invent attributes the
-snapshot doesn't show. `browser_validate_selector` confirms count and
-flags brittleness; the framework's pipe-fallback (`"a | b | c"`)
-absorbs minor drift. If you can't ground a selector against live DOM
-after a snapshot + `browser_get(what='html', target='...')`, write a
-bug report (§ 1.2) instead of guessing.
+Pick what's actually in the live DOM — `data-testid`, `aria-label`,
+`id`, `name`, `placeholder`, stable class, text. Don't invent attributes
+the snapshot doesn't show. Confirm count via
+`agent-browser get count '<css>'` before writing the selector into the
+suite. The framework's pipe-fallback (`"a | b | c"`) absorbs minor
+drift. If you can't ground a selector against the live DOM after a
+snapshot + `agent-browser get html '<css>'`, write a bug report
+(§ 1.2) instead of guessing.
 
 ### Pipe-fallback selectors
 

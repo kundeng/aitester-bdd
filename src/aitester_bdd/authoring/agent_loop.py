@@ -198,18 +198,36 @@ def _author_once(
     return a result with ok=False and the transcript for inspection.
     """
     from deepagents import create_deep_agent
+    from deepagents.backends import LocalShellBackend
     from langgraph.checkpoint.memory import InMemorySaver
 
-    from aitester_bdd.authoring.tools import build_tools
+    from aitester_bdd.authoring.tools import build_tools, session_id
 
     llm = _build_llm()
     tools = build_tools(source_root=source_root)
     system_prompt = load_skill()
 
+    # LocalShellBackend gives the agent an `execute` tool for shell
+    # commands (mirrors wise-rpa-bdd). The agent calls `agent-browser
+    # <subcommand> --json` directly; session is pinned via env so all
+    # invocations share the same persistent browser session for this
+    # authoring run.
+    backend_env = dict(os.environ)  # inherit PATH etc.
+    backend_env["AGENT_BROWSER_SESSION"] = session_id()
+
+    backend = LocalShellBackend(
+        root_dir=str(source_root) if source_root else None,
+        env=backend_env,
+        inherit_env=True,
+        timeout=120,
+        max_output_bytes=200_000,
+    )
+
     agent = create_deep_agent(
         model=llm,
         tools=tools,
         system_prompt=system_prompt,
+        backend=backend,
         checkpointer=InMemorySaver(),
     )
 
@@ -222,10 +240,10 @@ def _author_once(
         f"Base URL: {base_url}\n\n"
         f"You are authoring an aitester-bdd .robot test suite for this story. "
         f"Follow the SKILL instructions:\n"
-        f"  - Drive the live target via the Playwright browser tools to ground "
-        f"every selector. Read attributes from browser_snapshot output and use "
-        f"data-testid / aria-label / placeholder / id / name / role from what "
-        f"the snapshot actually shows. Never invent attributes.\n"
+        f"  - Drive the live target via `execute \"agent-browser ... --json\"` "
+        f"(shell). Chain multiple agent-browser commands with `&&` to batch "
+        f"related steps in one shell call. Every selector in the suite must "
+        f"come from a real attribute observed on the live page — never invent.\n"
         f"  - Declare ${{ENGINE}}    {engine} in the *** Variables *** section "
         f"of the suite so `aitester run` picks the matching runtime.\n"
         f"  - If the system is broken in a way that prevents authoring, file a bug report.\n\n"
