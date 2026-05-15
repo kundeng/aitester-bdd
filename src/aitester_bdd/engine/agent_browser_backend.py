@@ -77,6 +77,11 @@ class AgentBrowserBackend:
         self._last_response_status: int | None = None
         self._last_response_body: str = ""
         self._opened = False
+        # Isolated session per adapter instance — gives the suite its
+        # own cookie jar so authentication state from prior runs (or
+        # from the authoring session) never leaks into the test.
+        import os, uuid
+        self._session = os.environ.get("AITESTER_RUN_SESSION") or f"aitester-run-{uuid.uuid4().hex[:8]}"
 
     # ------------------------------------------------------------------
     # CLI bridge
@@ -85,7 +90,7 @@ class AgentBrowserBackend:
     def _run(self, *args: str, timeout: int | None = None) -> str:
         """Run an agent-browser subprocess. Returns stdout (stripped) or
         raises RuntimeError on a CLI failure. Empty stdout returns ""."""
-        cmd = ["agent-browser", *args]
+        cmd = ["agent-browser", "--session", self._session, *args]
         try:
             r = subprocess.run(
                 cmd,
@@ -119,22 +124,10 @@ class AgentBrowserBackend:
     def new_session(self, *, headless: bool = True) -> None:
         # The CLI auto-launches its browser on first `open`. There's no
         # explicit session-start call. We track `_opened` so `close()`
-        # is safe even before any navigation.
+        # is safe even before any navigation. The per-adapter
+        # `self._session` (set in __init__) keeps cookies isolated from
+        # any other agent-browser invocation.
         self._opened = False
-        # Clear cookies + local storage so each test run starts cold.
-        # Without this, cookies from prior authoring or previous run-
-        # invocations persist (agent-browser default session is shared
-        # across all CLI calls), and suites that exercise login flows
-        # land on the authenticated landing page instead of the login
-        # form. `cookies clear` is safe even before any nav.
-        try:
-            self._run("cookies", "clear", timeout=5)
-        except Exception:
-            pass
-        try:
-            self._run("storage", "local", "clear", timeout=5)
-        except Exception:
-            pass
 
     def close(self) -> None:
         if self._opened:
