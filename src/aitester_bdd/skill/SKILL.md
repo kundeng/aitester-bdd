@@ -71,28 +71,52 @@ Picking a backend doesn't change the authored suite. If a test passes
 against one runtime but fails on another, that's a real cross-driver
 DOM-view bug worth filing. CSS is the lingua franca of all three.
 
-### Playwright explorer tool reference
+### Explorer tool reference (agent-browser backed)
 
-Your eyes and hands during Explore. Tools are exposed by the agent
-loop and call Playwright sync API in a worker thread. A single
-browser session is maintained across all tool calls — `browser_open`
-once, then issue many `browser_snapshot` / `browser_click` etc.
-against the same page.
+Your eyes and hands during Explore. The explorer drives the
+`agent-browser` CLI under a single persistent session. The big
+difference from a raw DOM explorer: `browser_snapshot` returns a
+**tight accessibility tree** with `@ref` markers, and `browser_find`
+lets you act on elements by their accessible **role + name** without
+synthesizing CSS at all. CSS only appears at suite-write time when
+you `browser_get_attr(@ref, 'data-testid')` to materialize a stable
+attribute for the `.robot` file.
 
 | Tool | Purpose |
 |------|---------|
 | `browser_open(url)` | Navigate. Persistent session. |
-| `browser_snapshot()` | **Your source of truth for selectors.** Returns URL + title + a list of interactive/landmark elements with their real attributes (`data-testid`, `placeholder`, `aria-label`, `id`, `name`, `type`, `role`, `href`, `class`). Call after every navigation or action that changes the page. |
-| `browser_click(css)` | Click. CSS selector. |
-| `browser_type(css, text)` | Fill an input (clears first). |
-| `browser_get_text(css)` | Inner text of first matching element. |
-| `browser_get_count(css)` | Number of matching elements. |
-| `browser_get_html(css)` | Outer HTML of first match — use when snapshot's per-element summary isn't enough (need full child tree, exact class list, etc.). |
-| `browser_get_attr(css, name)` | Single attribute value. |
-| `browser_eval(js)` | Run JS in page context. |
+| `browser_snapshot(scope='')` | **Your source of truth.** Returns an a11y tree like `- button "Sign in" [ref=e3]` with role + name + ephemeral `@ref` per interactive element. Optionally scope to a CSS selector (e.g. `'.chat-panel'`) to keep the tree tight. Call after every navigation or state change. `@refs` last only until the next snapshot. |
+| `browser_find(locator, value, action, name='', text='')` | Playwright-style locate-then-act in one call. `locator ∈ {role, text, label, placeholder, alt, title, testid}`, `action ∈ {click, fill, type, hover, focus, check, uncheck, get_text, get_count}`. Examples: `find role textbox fill --name 'Username' --text 'admin'`, `find role button click --name 'Sign in'`, `find testid chat-input click`. **Use this instead of writing CSS during exploration.** |
+| `browser_click(target)` | Click by `@ref` or CSS. |
+| `browser_fill(target, text)` | Clear + fill an input. `@ref` or CSS. |
+| `browser_press(key)` | Press a key (Enter, Tab, Escape, Control+a, ArrowDown, ...) on the focused element. |
+| `browser_get(what, target='')` | Read state: `what ∈ {text, html, value, count, url, title}`. `target` is `@ref` or CSS (ignored for url/title). |
+| `browser_get_attr(target, name)` | **Your ref→CSS bridge.** Resolve an `@ref` (or CSS) to a single DOM attribute (`data-testid`, `aria-label`, `id`, `name`, `placeholder`, `href`). Returns `''` when unset. Call this for the highest-priority stable attribute and emit it in the suite. |
+| `browser_wait(target)` | Wait for a CSS selector to attach/become visible OR sleep N ms (string `"5000"`). Use this for SSE streams, late-rendered tool cards, transitions — NEVER use a raw timing trick. |
+| `browser_validate_selector(css, scope='', expected='unique')` | **REQUIRED BEFORE WRITING ANY SELECTOR INTO .robot.** Validates against the live page; returns count + ok + suggestion + brittleness warning. See § "Validate every selector before you write it". |
 | `browser_screenshot(path)` | Save PNG. |
-| `browser_close()` | Tear down session. |
 | `read_file(path)` | (white-box mode only) Read a source file under the configured source_root — useful for finding `data-testid` declarations or route mounts in the source code. |
+
+### Authoring workflow — refs during explore, CSS at write
+
+The exploration phase is **ref-first** because refs and role+name
+locators give you intent-grounded interaction with zero CSS
+synthesis. The suite is **CSS-only** because the runtime backends
+all accept CSS:
+
+1. `browser_open(url)` → navigate
+2. `browser_snapshot()` → get the a11y tree + `@refs`
+3. `browser_find(...)` OR `browser_click(@ref)` / `browser_fill(@ref, ...)` — act by intent
+4. After each action, `browser_snapshot()` again — state changed, refs renumbered
+5. When you know which element each rule will target:
+   - `browser_get_attr(@ref, 'data-testid')` — first choice
+   - If empty: `browser_get_attr(@ref, 'aria-label')` → `'id'` (if not auto-generated) → `'name'` → `'placeholder'`
+   - Emit the best as CSS in the suite (`[data-testid="..."]`, `[aria-label="..."]`, etc.)
+6. `browser_validate_selector(<css>, expected=...)` for each — confirm `ok: true`
+7. Only then `write_robot_suite(...)`
+
+This pattern keeps exploration cheap (refs + intent are short) and
+the suite portable (CSS runs on every backend).
 
 ### Selector priority (non-negotiable)
 
@@ -484,13 +508,15 @@ The full keyword surface for state checks:
 
 | Keyword | Purpose |
 |---------|---------|
-| `And I set retry ${max} times with ${delay} ms delay` | If guards fail, replay body + recheck up to N times |
+| `And I set rule timeout ${ms} ms` | Per-rule deadline AND per-state-check observation timeout. Use this when an assertion depends on async streamed content (e.g. an LLM response, a backend query). Default is 30000 ms — only set it when you need longer. |
+| `And I set retry ${max} times with ${delay} ms delay` | Replay the **body** (actions + state checks) up to N times. Rarely needed — only when an action must be re-fired (form post that may need a re-click). For pure observations, prefer `set rule timeout` since selectors already auto-wait. |
 | `And I set guard policy "${policy}"` | `skip` (default) or `abort` (raise to stop whole walk) |
-| `And I set rule timeout ${ms} ms` | Per-rule deadline; body exceeding it fails the rule |
 | `And I pause interrupts` | Suppress dismiss-overlays inside this rule (when testing the modal itself) |
 | `And I scope interrupts to "${selectors}"` | Replace the verification-wide dismiss list for this rule (comma-separated) |
 | `And I screenshot on enter` | Snapshot when the rule starts (for debugging entry state) |
 | `And I screenshot on fail` | Snapshot on any failure within the rule |
+
+**Selectors auto-wait — never author explicit `browser_wait` calls in the suite.** Every `selector "X" exists`, `locator "X" has text "..."`, and `count of locator "X" is at least N` polls the page until the timeout (default 30s, or whatever `set rule timeout` declares). Authoring `set retry` for a pure assertion is almost always wrong — the auto-wait covers it.
 
 ### 4.7 Artifacts — named bags of captured records (TIER 1 from WISE)
 
@@ -890,6 +916,8 @@ I define rule "approve_persists"
 ```
 
 ### 6.4 Observation gates (async dependencies)
+
+**An action rule asserts its own immediate effect, not deferred completion.** If the action triggers async backend work (send chat, submit form, start a job), the action rule's body can verify the *user input landed* (bubble appears, form clears, button disables) — but **completion of the deferred work goes in a child rule** with `set rule timeout`. Mixing the two makes a slow backend look like a broken action.
 
 **Never use `When I wait ${ms} ms`.** Three patterns:
 

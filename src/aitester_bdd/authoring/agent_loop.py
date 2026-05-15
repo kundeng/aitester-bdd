@@ -37,7 +37,8 @@ log = logging.getLogger("aitester_bdd.authoring.agent_loop")
 DEFAULT_MODEL = "cc/claude-opus-4-7"
 DEFAULT_BASE_URL = "http://localhost:20128/v1"
 DEFAULT_API_KEY = "placeholder"
-DEFAULT_MAX_ITERS = 40
+DEFAULT_MAX_ITERS = 100
+DEFAULT_MAX_ATTEMPTS = 2  # how many times to re-run the whole author loop on failure
 
 
 # ─── Outputs ─────────────────────────────────────────────────────────
@@ -91,11 +92,15 @@ def _build_llm():
     api_key = os.environ.get("OPENAI_API_KEY", DEFAULT_API_KEY)
 
     # NB: opus-4.7 rejects `temperature` as deprecated; omit it.
+    # max_retries=8: tolerate transient Anthropic 529 overloads + 502/503/504.
+    # LangChain backs off exponentially; 8 retries covers a ~60s outage window.
+    max_retries = int(os.environ.get("AITESTER_LLM_MAX_RETRIES", "8"))
     return ChatOpenAI(
         model=model,
         base_url=base_url,
         api_key=api_key,
         timeout=120.0,
+        max_retries=max_retries,
     )
 
 
@@ -123,6 +128,52 @@ def _parse_terminal_markers(transcript: list[dict]) -> tuple[Optional[Path], Opt
 
 
 def author_with_agent(
+    *,
+    story: str,
+    base_url: str,
+    suite_path: Path,
+    bug_report_dir: Path,
+    source_root: Optional[Path] = None,
+    engine: str = "agent-browser",
+    max_iters: int = DEFAULT_MAX_ITERS,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    debug: bool = False,
+) -> AuthoringResult:
+    """Public entry point: retries the inner loop on crash/recursion-limit.
+
+    Each retry feeds back a short hint about why the prior attempt failed,
+    so the next attempt knows to be more decisive (terminate earlier).
+    """
+    last_failure: Optional[str] = None
+    for attempt in range(1, max_attempts + 1):
+        suffix = ""
+        if last_failure:
+            suffix = (
+                f"\n\n[RETRY {attempt}/{max_attempts}] Prior attempt failed: "
+                f"{last_failure}. Be more decisive — write the suite as soon "
+                f"as your selectors are grounded; do not re-validate alternatives "
+                f"or re-explore on a fresh page load."
+            )
+        if debug:
+            import sys
+            print(f"[author/attempt {attempt}/{max_attempts}]", file=sys.stderr)
+        result = _author_once(
+            story=story + suffix,
+            base_url=base_url,
+            suite_path=suite_path,
+            bug_report_dir=bug_report_dir,
+            source_root=source_root,
+            engine=engine,
+            max_iters=max_iters,
+            debug=debug,
+        )
+        if result.suite_path or result.bug_report_path:
+            return result
+        last_failure = result.final_message or "no terminal call reached"
+    return result  # last attempt's result
+
+
+def _author_once(
     *,
     story: str,
     base_url: str,

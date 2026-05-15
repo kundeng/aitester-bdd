@@ -41,7 +41,8 @@ def author(
              "All three accept CSS selectors so the suite is portable; `aitester run` reads ${ENGINE} "
              "from the suite and sets AITESTER_BROWSER accordingly.",
     ),
-    max_iters: int = typer.Option(40, "--max-iters", help="Max agent iterations before giving up."),
+    max_iters: int = typer.Option(100, "--max-iters", help="Max agent iterations per attempt before bailing."),
+    max_attempts: int = typer.Option(2, "--max-attempts", help="Retry the whole authoring loop up to N times on crash / recursion limit."),
     debug: bool = typer.Option(
         False, "--debug", "-d",
         help="Stream each agent step (tool calls + results) to stderr so you can watch the explorer work.",
@@ -79,6 +80,7 @@ def author(
         source_root=src_root,
         engine=engine,
         max_iters=max_iters,
+        max_attempts=max_attempts,
         debug=debug,
     )
 

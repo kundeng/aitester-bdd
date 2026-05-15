@@ -51,8 +51,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("aitester_bdd.engine.walk")
 
-DEFAULT_OBSERVATION_TIMEOUT_MS = 5000
-DEFAULT_GUARD_TIMEOUT_MS = 200
+DEFAULT_OBSERVATION_TIMEOUT_MS = 30000  # WISE parity: Playwright's default 30s
+DEFAULT_GUARD_TIMEOUT_MS = 200          # guards stay fast — they're checking pre-state, not waiting
 DEFAULT_RUN_TIMEOUT_S = 300  # global cap — override via AITESTER_RUN_TIMEOUT env
 
 
@@ -575,9 +575,14 @@ def _check_guards(
                     registry.fire_after_dismiss(rule, sel)
         except Exception:
             pass
+    # When `set rule timeout N ms` is declared, guards inherit it too —
+    # so a pure-observation rule (no actions, only state checks) can wait
+    # up to N ms for the world to converge. Mirrors WISE / Playwright's
+    # behavior of one timeout for every wait.
+    guard_timeout = int(rule.options.get("timeout_ms") or DEFAULT_GUARD_TIMEOUT_MS)
     for g in guards:
         ok, expected, observed = _eval_state_check(
-            browser, g, timeout_ms=DEFAULT_GUARD_TIMEOUT_MS, scope=scope,
+            browser, g, timeout_ms=guard_timeout, scope=scope,
         )
         if registry is not None:
             registry.fire_after_state_check(
@@ -660,8 +665,15 @@ def _execute_body(
 
         if isinstance(step, StateCheck):
             # Inline observation gate / post-action assertion.
+            # When the rule declares `set rule timeout N ms`, use that as the
+            # per-state-check observation timeout — so authors can express
+            # "this state is async, give it up to N ms to appear" with one
+            # knob, no `set retry` needed. (WISE parity.)
+            observation_timeout = int(
+                rule.options.get("timeout_ms") or DEFAULT_OBSERVATION_TIMEOUT_MS
+            )
             ok, expected, observed = _eval_state_check(
-                browser, step, timeout_ms=DEFAULT_OBSERVATION_TIMEOUT_MS, scope=scope,
+                browser, step, timeout_ms=observation_timeout, scope=scope,
             )
             if registry is not None:
                 registry.fire_after_state_check(

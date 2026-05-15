@@ -747,33 +747,69 @@ class AITester:
     # State Checks — Counts
     # ------------------------------------------------------------------
 
-    @keyword("Then count of locator \"${css}\" equals ${n}")
-    def then_count_eq(self, css: str, n: str) -> None:
+    def _count_eq(self, css: str, n: str) -> None:
         self._current_rule().items.append(StateCheck("count_eq", locator=_strip_quotes(css), expected=str(n)))
 
-    @keyword("Then count of locator \"${css}\" is at least ${n}")
-    def then_count_at_least(self, css: str, n: str) -> None:
+    @keyword("Given count of locator \"${css}\" equals ${n}")
+    def given_count_eq(self, css: str, n: str) -> None: self._count_eq(css, n)
+    @keyword("And count of locator \"${css}\" equals ${n}")
+    def and_count_eq(self, css: str, n: str) -> None: self._count_eq(css, n)
+    @keyword("Then count of locator \"${css}\" equals ${n}")
+    def then_count_eq(self, css: str, n: str) -> None: self._count_eq(css, n)
+
+    def _count_at_least(self, css: str, n: str) -> None:
         self._current_rule().items.append(StateCheck("count_at_least", locator=_strip_quotes(css), expected=str(n)))
 
-    @keyword("Then count of locator \"${css}\" is at most ${n}")
-    def then_count_at_most(self, css: str, n: str) -> None:
+    @keyword("Given count of locator \"${css}\" is at least ${n}")
+    def given_count_at_least(self, css: str, n: str) -> None: self._count_at_least(css, n)
+    @keyword("And count of locator \"${css}\" is at least ${n}")
+    def and_count_at_least(self, css: str, n: str) -> None: self._count_at_least(css, n)
+    @keyword("Then count of locator \"${css}\" is at least ${n}")
+    def then_count_at_least(self, css: str, n: str) -> None: self._count_at_least(css, n)
+
+    def _count_at_most(self, css: str, n: str) -> None:
         self._current_rule().items.append(StateCheck("count_at_most", locator=_strip_quotes(css), expected=str(n)))
+
+    @keyword("Given count of locator \"${css}\" is at most ${n}")
+    def given_count_at_most(self, css: str, n: str) -> None: self._count_at_most(css, n)
+    @keyword("And count of locator \"${css}\" is at most ${n}")
+    def and_count_at_most(self, css: str, n: str) -> None: self._count_at_most(css, n)
+    @keyword("Then count of locator \"${css}\" is at most ${n}")
+    def then_count_at_most(self, css: str, n: str) -> None: self._count_at_most(css, n)
 
     # ------------------------------------------------------------------
     # State Checks — Element Text
     # ------------------------------------------------------------------
 
-    @keyword("Then locator \"${css}\" has text \"${text}\"")
-    def then_has_text(self, css: str, text: str) -> None:
+    def _has_text(self, css: str, text: str) -> None:
         self._current_rule().items.append(StateCheck("has_text", locator=_strip_quotes(css), expected=_strip_quotes(text)))
 
-    @keyword("Then locator \"${css}\" contains \"${substring}\"")
-    def then_contains(self, css: str, substring: str) -> None:
+    @keyword("Given locator \"${css}\" has text \"${text}\"")
+    def given_has_text(self, css: str, text: str) -> None: self._has_text(css, text)
+    @keyword("And locator \"${css}\" has text \"${text}\"")
+    def and_has_text(self, css: str, text: str) -> None: self._has_text(css, text)
+    @keyword("Then locator \"${css}\" has text \"${text}\"")
+    def then_has_text(self, css: str, text: str) -> None: self._has_text(css, text)
+
+    def _contains(self, css: str, substring: str) -> None:
         self._current_rule().items.append(StateCheck("contains", locator=_strip_quotes(css), expected=_strip_quotes(substring)))
 
-    @keyword("Then locator \"${css}\" matches \"${regex}\"")
-    def then_matches(self, css: str, regex: str) -> None:
+    @keyword("Given locator \"${css}\" contains \"${substring}\"")
+    def given_contains(self, css: str, substring: str) -> None: self._contains(css, substring)
+    @keyword("And locator \"${css}\" contains \"${substring}\"")
+    def and_contains(self, css: str, substring: str) -> None: self._contains(css, substring)
+    @keyword("Then locator \"${css}\" contains \"${substring}\"")
+    def then_contains(self, css: str, substring: str) -> None: self._contains(css, substring)
+
+    def _matches(self, css: str, regex: str) -> None:
         self._current_rule().items.append(StateCheck("matches", locator=_strip_quotes(css), expected=_strip_quotes(regex)))
+
+    @keyword("Given locator \"${css}\" matches \"${regex}\"")
+    def given_matches(self, css: str, regex: str) -> None: self._matches(css, regex)
+    @keyword("And locator \"${css}\" matches \"${regex}\"")
+    def and_matches(self, css: str, regex: str) -> None: self._matches(css, regex)
+    @keyword("Then locator \"${css}\" matches \"${regex}\"")
+    def then_matches(self, css: str, regex: str) -> None: self._matches(css, regex)
 
     def _not_contains(self, css: str, substring: str) -> None:
         self._current_rule().items.append(StateCheck("not_contains", locator=_strip_quotes(css), expected=_strip_quotes(substring)))
@@ -794,29 +830,65 @@ class AITester:
     # State Checks — Element State
     # ------------------------------------------------------------------
 
-    @keyword("Then locator \"${css}\" is visible")
-    def then_visible(self, css: str) -> None:
+    def _visible(self, css: str) -> None:
         self._current_rule().items.append(StateCheck("visible", locator=_strip_quotes(css)))
 
-    @keyword("Then locator \"${css}\" is hidden")
-    def then_hidden(self, css: str) -> None:
+    @keyword("Given locator \"${css}\" is visible")
+    def given_visible(self, css: str) -> None: self._visible(css)
+    @keyword("And locator \"${css}\" is visible")
+    def and_visible(self, css: str) -> None: self._visible(css)
+    @keyword("Then locator \"${css}\" is visible")
+    def then_visible(self, css: str) -> None: self._visible(css)
+
+    def _hidden(self, css: str) -> None:
         self._current_rule().items.append(StateCheck("hidden", locator=_strip_quotes(css)))
 
-    @keyword("Then locator \"${css}\" is enabled")
-    def then_enabled(self, css: str) -> None:
+    @keyword("Given locator \"${css}\" is hidden")
+    def given_hidden(self, css: str) -> None: self._hidden(css)
+    @keyword("And locator \"${css}\" is hidden")
+    def and_hidden(self, css: str) -> None: self._hidden(css)
+    @keyword("Then locator \"${css}\" is hidden")
+    def then_hidden(self, css: str) -> None: self._hidden(css)
+
+    def _enabled(self, css: str) -> None:
         self._current_rule().items.append(StateCheck("enabled", locator=_strip_quotes(css)))
 
-    @keyword("Then locator \"${css}\" is disabled")
-    def then_disabled(self, css: str) -> None:
+    @keyword("Given locator \"${css}\" is enabled")
+    def given_enabled(self, css: str) -> None: self._enabled(css)
+    @keyword("And locator \"${css}\" is enabled")
+    def and_enabled(self, css: str) -> None: self._enabled(css)
+    @keyword("Then locator \"${css}\" is enabled")
+    def then_enabled(self, css: str) -> None: self._enabled(css)
+
+    def _disabled(self, css: str) -> None:
         self._current_rule().items.append(StateCheck("disabled", locator=_strip_quotes(css)))
 
-    @keyword("Then locator \"${css}\" is checked")
-    def then_checked(self, css: str) -> None:
+    @keyword("Given locator \"${css}\" is disabled")
+    def given_disabled(self, css: str) -> None: self._disabled(css)
+    @keyword("And locator \"${css}\" is disabled")
+    def and_disabled(self, css: str) -> None: self._disabled(css)
+    @keyword("Then locator \"${css}\" is disabled")
+    def then_disabled(self, css: str) -> None: self._disabled(css)
+
+    def _checked(self, css: str) -> None:
         self._current_rule().items.append(StateCheck("checked", locator=_strip_quotes(css)))
 
-    @keyword("Then locator \"${css}\" has class \"${name}\"")
-    def then_has_class(self, css: str, name: str) -> None:
+    @keyword("Given locator \"${css}\" is checked")
+    def given_checked(self, css: str) -> None: self._checked(css)
+    @keyword("And locator \"${css}\" is checked")
+    def and_checked(self, css: str) -> None: self._checked(css)
+    @keyword("Then locator \"${css}\" is checked")
+    def then_checked(self, css: str) -> None: self._checked(css)
+
+    def _has_class(self, css: str, name: str) -> None:
         self._current_rule().items.append(StateCheck("has_class", locator=_strip_quotes(css), expected=_strip_quotes(name)))
+
+    @keyword("Given locator \"${css}\" has class \"${name}\"")
+    def given_has_class(self, css: str, name: str) -> None: self._has_class(css, name)
+    @keyword("And locator \"${css}\" has class \"${name}\"")
+    def and_has_class(self, css: str, name: str) -> None: self._has_class(css, name)
+    @keyword("Then locator \"${css}\" has class \"${name}\"")
+    def then_has_class(self, css: str, name: str) -> None: self._has_class(css, name)
 
     def _not_class(self, css: str, name: str) -> None:
         self._current_rule().items.append(StateCheck("not_class", locator=_strip_quotes(css), expected=_strip_quotes(name)))
