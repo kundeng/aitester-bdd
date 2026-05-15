@@ -302,6 +302,13 @@ class AgentBrowserBackend:
         s = script.strip()
         if s.startswith("() =>") or s.startswith("function"):
             s = f"({s})()"
+        elif "return " in s:
+            # Bare `return X` at top level is a SyntaxError in Playwright's
+            # evaluate. The agent very often writes it that way (matches
+            # natural function-body grammar). Auto-wrap in an IIFE so the
+            # return is legal. Skip if already IIFE-shaped.
+            if not (s.startswith("(") and s.endswith(")()")):
+                s = f"(() => {{ {s} }})()"
         try:
             out = self._run("eval", s, timeout=30)
         except RuntimeError as exc:
