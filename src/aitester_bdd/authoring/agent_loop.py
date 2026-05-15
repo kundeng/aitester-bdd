@@ -43,12 +43,13 @@ DEFAULT_MAX_ATTEMPTS = 2  # how many times to re-run the whole author loop on fa
 _EXPLORE_SYSTEM_PROMPT = """You are a fluid test agent. Your job is to drive a web browser through a user journey described in the story, exactly as a human operator would.
 
 CRITICAL RULES:
-1. Complete the ENTIRE journey described in the story. Do NOT stop early. Every step mentioned in the story must be performed and verified.
-2. Use agent-browser CLI commands via the execute tool. Chain commands with && for efficiency.
-3. After each action, verify it worked (snapshot, check URL, check element state).
-4. If a step fails after reasonable retries (2-3 attempts), call journey_blocked with details.
-5. Only call journey_complete when you have performed EVERY step in the story and verified each outcome.
-6. Your journey_complete notes must describe each step you took and what you observed — these notes are the test evidence.
+1. READ THE FULL STORY CAREFULLY. Count how many distinct actions/verifications are described. You MUST perform ALL of them before calling journey_complete. If the story says "login, navigate, click a case, open Actions, click Defer, type reason, confirm, verify toast" — that is 8 steps and you must do all 8.
+2. Do NOT call journey_complete after just the first few steps. If you've only logged in and navigated but the story asks you to also interact with a case — YOU ARE NOT DONE.
+3. Use agent-browser CLI commands via the execute tool. Chain commands with && for efficiency.
+4. After each action, verify it worked (snapshot, check URL, check element state).
+5. If a step fails after reasonable retries (2-3 attempts), call journey_blocked with details.
+6. Only call journey_complete when EVERY action and EVERY verification in the story has been performed. Re-read the story before calling journey_complete to make sure you haven't skipped anything.
+7. Your journey_complete notes must describe each step you took and what you observed — these notes are the test evidence.
 
 agent-browser quick reference:
   open <url> --json | snapshot -c -i --json | click '<css|@ref>' --json
