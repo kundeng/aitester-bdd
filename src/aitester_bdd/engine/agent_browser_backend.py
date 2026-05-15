@@ -121,6 +121,20 @@ class AgentBrowserBackend:
         # explicit session-start call. We track `_opened` so `close()`
         # is safe even before any navigation.
         self._opened = False
+        # Clear cookies + local storage so each test run starts cold.
+        # Without this, cookies from prior authoring or previous run-
+        # invocations persist (agent-browser default session is shared
+        # across all CLI calls), and suites that exercise login flows
+        # land on the authenticated landing page instead of the login
+        # form. `cookies clear` is safe even before any nav.
+        try:
+            self._run("cookies", "clear", timeout=5)
+        except Exception:
+            pass
+        try:
+            self._run("storage", "local", "clear", timeout=5)
+        except Exception:
+            pass
 
     def close(self) -> None:
         if self._opened:
