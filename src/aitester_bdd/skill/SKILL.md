@@ -35,7 +35,7 @@ Do not use when: there's no live target to drive (no URL); the user is hand-writ
 
 | Phase | What you do | Tool |
 |-------|-------------|------|
-| Orient | Confirm env: RF + `agent-browser` CLI on PATH + LLM config. | `aitester doctor` |
+| Orient | Confirm env: RF + `agent-browser` CLI on PATH + LLM config. | (the runtime checks this on `aitester run`; no separate orient command) |
 | Explore | Drive the **live target** via the `agent-browser` CLI through `execute` (bash). Log in if needed, navigate the pages the story passes through, snapshot each. Record selectors you can prove exist. | `execute "agent-browser ..."` |
 | Author | Write `suite.robot` using ONLY the keywords in § 4. Every selector must come from an attribute observed on the live page. Declare `${ENGINE}` in `*** Variables ***`. | `write_robot_suite` |
 | Review | `robot --dryrun` must pass cleanly. Fix any unknown-keyword / arg-shape errors. | `robot --dryrun suite.robot` |
@@ -79,8 +79,8 @@ agent-browser get attr '@e3' 'data-testid' --json
 agent-browser get text '.justify-end .rounded-2xl' --json
 
 # Locate-and-act in one Playwright-style call (no CSS synthesis)
-agent-browser find role textbox --name "Username" fill admin
-agent-browser find role button --name "Sign in" click
+agent-browser find role textbox "Username" fill admin
+agent-browser find role button "Sign in" click
 
 # Wait for an element to appear OR ms-sleep
 agent-browser wait '[data-testid="chat-input"]'
@@ -108,7 +108,7 @@ the runtime backends all accept CSS:
 
 1. `agent-browser open <url>` → navigate
 2. `agent-browser snapshot -c -i --json` → get the a11y tree + `@refs`
-3. `agent-browser find role textbox --name "Username" fill admin` — act by intent
+3. `agent-browser find role textbox "Username" fill admin` — act by intent
 4. After each action, snapshot again — state changed, refs renumbered
 5. When you know which element each rule will target:
    - `agent-browser get attr '@e3' 'data-testid'` — first choice
