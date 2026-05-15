@@ -1632,9 +1632,15 @@ class AITester:
             Action("call_keyword", target=_strip_quotes(name), options={"args": list(args)})
         )
 
-    @keyword("And I evaluate js \"${script}\"")
-    def evaluate_js(self, script: str) -> None:
+    def _evaluate_js(self, script: str) -> None:
         self._current_rule().items.append(Action("js", value=_strip_quotes(script)))
+
+    @keyword("When I evaluate js \"${script}\"")
+    def when_evaluate_js(self, script: str) -> None: self._evaluate_js(script)
+    @keyword("And I evaluate js \"${script}\"")
+    def and_evaluate_js(self, script: str) -> None: self._evaluate_js(script)
+    @keyword("Then I evaluate js \"${script}\"")
+    def then_evaluate_js(self, script: str) -> None: self._evaluate_js(script)
 
     # ------------------------------------------------------------------
     # Internal access
