@@ -731,6 +731,10 @@ class AITester:
     def _selector_does_not_exist(self, css: str) -> None:
         self._current_rule().items.append(StateCheck("selector_missing", locator=_strip_quotes(css)))
 
+    @keyword("Given selector \"${css}\" does not exist")
+    def given_selector_does_not_exist(self, css: str) -> None:
+        self._selector_does_not_exist(css)
+
     @keyword("But selector \"${css}\" does not exist")
     def but_selector_does_not_exist(self, css: str) -> None:
         self._selector_does_not_exist(css)
@@ -905,37 +909,73 @@ class AITester:
     def then_not_class_kw(self, css: str, name: str) -> None:
         self._not_class(css, name)
 
-    @keyword("Then locator \"${css}\" has attribute \"${attr}\" equal to \"${value}\"")
-    def then_attr_eq(self, css: str, attr: str, value: str) -> None:
+    def _attr_eq(self, css: str, attr: str, value: str) -> None:
         self._current_rule().items.append(
             StateCheck("attr_eq", locator=_strip_quotes(css), expected=_strip_quotes(value), extra={"attr": _strip_quotes(attr)})
         )
 
-    @keyword("Then locator \"${css}\" has attribute \"${attr}\" containing \"${substring}\"")
-    def then_attr_contains(self, css: str, attr: str, substring: str) -> None:
+    @keyword("Given locator \"${css}\" has attribute \"${attr}\" equal to \"${value}\"")
+    def given_attr_eq(self, css: str, attr: str, value: str) -> None: self._attr_eq(css, attr, value)
+    @keyword("And locator \"${css}\" has attribute \"${attr}\" equal to \"${value}\"")
+    def and_attr_eq(self, css: str, attr: str, value: str) -> None: self._attr_eq(css, attr, value)
+    @keyword("Then locator \"${css}\" has attribute \"${attr}\" equal to \"${value}\"")
+    def then_attr_eq(self, css: str, attr: str, value: str) -> None: self._attr_eq(css, attr, value)
+
+    def _attr_contains(self, css: str, attr: str, substring: str) -> None:
         self._current_rule().items.append(
             StateCheck("attr_contains", locator=_strip_quotes(css), expected=_strip_quotes(substring), extra={"attr": _strip_quotes(attr)})
         )
 
-    @keyword("Then input \"${css}\" has value \"${value}\"")
-    def then_input_value(self, css: str, value: str) -> None:
+    @keyword("Given locator \"${css}\" has attribute \"${attr}\" containing \"${substring}\"")
+    def given_attr_contains(self, css: str, attr: str, substring: str) -> None: self._attr_contains(css, attr, substring)
+    @keyword("And locator \"${css}\" has attribute \"${attr}\" containing \"${substring}\"")
+    def and_attr_contains(self, css: str, attr: str, substring: str) -> None: self._attr_contains(css, attr, substring)
+    @keyword("Then locator \"${css}\" has attribute \"${attr}\" containing \"${substring}\"")
+    def then_attr_contains(self, css: str, attr: str, substring: str) -> None: self._attr_contains(css, attr, substring)
+
+    def _input_value(self, css: str, value: str) -> None:
         self._current_rule().items.append(StateCheck("input_value", locator=_strip_quotes(css), expected=_strip_quotes(value)))
 
-    @keyword("Then select \"${css}\" has selected \"${value}\"")
-    def then_select_selected(self, css: str, value: str) -> None:
+    @keyword("Given input \"${css}\" has value \"${value}\"")
+    def given_input_value(self, css: str, value: str) -> None: self._input_value(css, value)
+    @keyword("And input \"${css}\" has value \"${value}\"")
+    def and_input_value(self, css: str, value: str) -> None: self._input_value(css, value)
+    @keyword("Then input \"${css}\" has value \"${value}\"")
+    def then_input_value(self, css: str, value: str) -> None: self._input_value(css, value)
+
+    def _select_selected(self, css: str, value: str) -> None:
         self._current_rule().items.append(StateCheck("select_selected", locator=_strip_quotes(css), expected=_strip_quotes(value)))
+
+    @keyword("Given select \"${css}\" has selected \"${value}\"")
+    def given_select_selected(self, css: str, value: str) -> None: self._select_selected(css, value)
+    @keyword("And select \"${css}\" has selected \"${value}\"")
+    def and_select_selected(self, css: str, value: str) -> None: self._select_selected(css, value)
+    @keyword("Then select \"${css}\" has selected \"${value}\"")
+    def then_select_selected(self, css: str, value: str) -> None: self._select_selected(css, value)
 
     # ------------------------------------------------------------------
     # State Checks — Network / API
     # ------------------------------------------------------------------
 
-    @keyword("Then last response status equals ${code}")
-    def then_last_status(self, code: str) -> None:
+    def _last_status(self, code: str) -> None:
         self._current_rule().items.append(StateCheck("last_status", expected=str(code)))
 
-    @keyword("Then last response body contains \"${text}\"")
-    def then_last_body_contains(self, text: str) -> None:
+    @keyword("Given last response status equals ${code}")
+    def given_last_status(self, code: str) -> None: self._last_status(code)
+    @keyword("And last response status equals ${code}")
+    def and_last_status(self, code: str) -> None: self._last_status(code)
+    @keyword("Then last response status equals ${code}")
+    def then_last_status(self, code: str) -> None: self._last_status(code)
+
+    def _last_body_contains(self, text: str) -> None:
         self._current_rule().items.append(StateCheck("last_body_contains", expected=_strip_quotes(text)))
+
+    @keyword("Given last response body contains \"${text}\"")
+    def given_last_body_contains(self, text: str) -> None: self._last_body_contains(text)
+    @keyword("And last response body contains \"${text}\"")
+    def and_last_body_contains(self, text: str) -> None: self._last_body_contains(text)
+    @keyword("Then last response body contains \"${text}\"")
+    def then_last_body_contains(self, text: str) -> None: self._last_body_contains(text)
 
     @keyword("Then api \"${path}\" returns \"${field}\" equal to \"${value}\"")
     def then_api_returns(self, path: str, field_: str, value: str) -> None:
@@ -957,17 +997,29 @@ class AITester:
     # than silently passing.
     # ------------------------------------------------------------------
 
-    @keyword("Then content of locator \"${css}\" semantically matches \"${prompt}\"")
-    def then_semantic_locator(self, css: str, prompt: str) -> None:
+    def _semantic_locator(self, css: str, prompt: str) -> None:
         self._current_rule().items.append(
             StateCheck("semantic", locator=_strip_quotes(css), expected=_strip_quotes(prompt), extra={"scope": "locator"})
         )
 
-    @keyword("Then page semantically matches \"${prompt}\"")
-    def then_semantic_page(self, prompt: str) -> None:
+    @keyword("Given content of locator \"${css}\" semantically matches \"${prompt}\"")
+    def given_semantic_locator(self, css: str, prompt: str) -> None: self._semantic_locator(css, prompt)
+    @keyword("And content of locator \"${css}\" semantically matches \"${prompt}\"")
+    def and_semantic_locator(self, css: str, prompt: str) -> None: self._semantic_locator(css, prompt)
+    @keyword("Then content of locator \"${css}\" semantically matches \"${prompt}\"")
+    def then_semantic_locator(self, css: str, prompt: str) -> None: self._semantic_locator(css, prompt)
+
+    def _semantic_page(self, prompt: str) -> None:
         self._current_rule().items.append(
             StateCheck("semantic", expected=_strip_quotes(prompt), extra={"scope": "page"})
         )
+
+    @keyword("Given page semantically matches \"${prompt}\"")
+    def given_semantic_page(self, prompt: str) -> None: self._semantic_page(prompt)
+    @keyword("And page semantically matches \"${prompt}\"")
+    def and_semantic_page(self, prompt: str) -> None: self._semantic_page(prompt)
+    @keyword("Then page semantically matches \"${prompt}\"")
+    def then_semantic_page(self, prompt: str) -> None: self._semantic_page(prompt)
 
     @keyword("Then screenshot semantically matches \"${prompt}\"")
     def then_visual_semantic(self, prompt: str) -> None:
