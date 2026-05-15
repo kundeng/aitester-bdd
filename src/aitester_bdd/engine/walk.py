@@ -1627,9 +1627,23 @@ def walk_verification(verification: "Verification") -> Verdict:
         # Suite-level state setup (auth, consent) — runs once before any
         # scenario. Ported from WISE.
         _run_state_setup(browser, verification)
-        for sc in verification.scenarios:
+        for sc_idx, sc in enumerate(verification.scenarios):
             if registry.fire_before_scenario(verification, sc):
                 continue
+
+            # Test-case isolation: clear cookies + storage between
+            # scenarios so each Robot test case starts with a clean
+            # session. Without this the first scenarios login state
+            # leaks into the second, breaking subsequent scenarios
+            # that author their own login rule (`type Username`
+            # times out because the user is already authenticated).
+            # Skip clear for the FIRST scenario — its session is
+            # already fresh from new_session() / `--session <uuid>`.
+            if sc_idx > 0 and hasattr(browser, "clear_state"):
+                try:
+                    browser.clear_state()
+                except Exception:
+                    pass
 
             if sc.entry_url:
                 browser.open(sc.entry_url)

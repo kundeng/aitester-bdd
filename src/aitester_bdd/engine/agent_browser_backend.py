@@ -129,6 +129,21 @@ class AgentBrowserBackend:
         # any other agent-browser invocation.
         self._opened = False
 
+    def clear_state(self) -> None:
+        """Wipe cookies + local storage in the current session.
+
+        Called between scenarios by the walker to give each Robot
+        test case a clean slate. Best-effort — if the browser hasn't
+        opened a page yet (initial session start), some clears fail
+        silently.
+        """
+        for args in (("cookies", "clear"), ("storage", "local", "clear"),
+                     ("storage", "session", "clear")):
+            try:
+                self._run(*args, timeout=5)
+            except Exception:
+                pass
+
     def close(self) -> None:
         if self._opened:
             try:
