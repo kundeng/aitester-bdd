@@ -626,10 +626,26 @@ class AITester:
         sels = [s.strip() for s in _strip_quotes(selectors).split(",") if s.strip()]
         self._current_rule().interrupt_override = sels
 
+    def _set_rule_timeout(self, ms: str) -> None:
+        """Per-rule deadline; rule fails if body exceeds it.
+
+        Accepts `30000`, `30000 ms`, `30 s`, `30s` — best-effort parse.
+        """
+        s = str(ms).strip().lower().replace(" ", "")
+        if s.endswith("ms"):
+            value = int(s[:-2] or "0")
+        elif s.endswith("s"):
+            value = int(float(s[:-1] or "0") * 1000)
+        else:
+            value = int(s or "0")
+        self._current_rule().options["timeout_ms"] = str(value)
+
     @keyword("And I set rule timeout ${ms} ms")
-    def set_rule_timeout(self, ms: str) -> None:
-        """Per-rule deadline; rule fails if body exceeds it."""
-        self._current_rule().options["timeout_ms"] = str(int(ms))
+    def and_set_rule_timeout_ms(self, ms: str) -> None: self._set_rule_timeout(ms)
+    @keyword("And I set rule timeout ${ms}")
+    def and_set_rule_timeout(self, ms: str) -> None: self._set_rule_timeout(ms)
+    @keyword("When I set rule timeout ${ms}")
+    def when_set_rule_timeout(self, ms: str) -> None: self._set_rule_timeout(ms)
 
     @keyword("And I scope children to \"${css}\"")
     def set_child_scope(self, css: str) -> None:
@@ -1025,6 +1041,13 @@ class AITester:
     def and_semantic_locator(self, css: str, prompt: str) -> None: self._semantic_locator(css, prompt)
     @keyword("Then content of locator \"${css}\" semantically matches \"${prompt}\"")
     def then_semantic_locator(self, css: str, prompt: str) -> None: self._semantic_locator(css, prompt)
+    # Shorter natural alias agents tend to produce.
+    @keyword("Given locator \"${css}\" semantically matches \"${prompt}\"")
+    def given_semantic_locator_short(self, css: str, prompt: str) -> None: self._semantic_locator(css, prompt)
+    @keyword("And locator \"${css}\" semantically matches \"${prompt}\"")
+    def and_semantic_locator_short(self, css: str, prompt: str) -> None: self._semantic_locator(css, prompt)
+    @keyword("Then locator \"${css}\" semantically matches \"${prompt}\"")
+    def then_semantic_locator_short(self, css: str, prompt: str) -> None: self._semantic_locator(css, prompt)
 
     def _semantic_page(self, prompt: str) -> None:
         self._current_rule().items.append(
@@ -1716,6 +1739,12 @@ class AITester:
     def and_evaluate_js(self, script: str) -> None: self._evaluate_js(script)
     @keyword("Then I evaluate js \"${script}\"")
     def then_evaluate_js(self, script: str) -> None: self._evaluate_js(script)
+    # Unquoted variants — agent sometimes uses Robot continuation-line
+    # (...) form for multi-line JS without quotes.
+    @keyword("When I evaluate js ${script}")
+    def when_evaluate_js_bare(self, script: str) -> None: self._evaluate_js(script)
+    @keyword("And I evaluate js ${script}")
+    def and_evaluate_js_bare(self, script: str) -> None: self._evaluate_js(script)
 
     # ------------------------------------------------------------------
     # Internal access
