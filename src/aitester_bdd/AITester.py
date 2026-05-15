@@ -1474,8 +1474,7 @@ class AITester:
     def when_double_click_locator(self, css: str) -> None:
         self._current_rule().items.append(Action("dblclick", target=_strip_quotes(css)))
 
-    @keyword("When I type \"${value}\" into locator \"${css}\"")
-    def when_type(self, value: str, css: str, *opts: str) -> None:
+    def _action_type(self, value: str, css: str, *opts: str) -> None:
         self._current_rule().items.append(
             Action(
                 "type",
@@ -1484,6 +1483,31 @@ class AITester:
                 options=_parse_options(opts),
             )
         )
+
+    @keyword("When I type \"${value}\" into locator \"${css}\"")
+    def when_type(self, value: str, css: str, *opts: str) -> None:
+        self._action_type(value, css, *opts)
+
+    @keyword("And I type \"${value}\" into locator \"${css}\"")
+    def and_type(self, value: str, css: str, *opts: str) -> None:
+        self._action_type(value, css, *opts)
+
+    # Natural alias the LLM tends to produce — same action.
+    @keyword("When I fill locator \"${css}\" with \"${value}\"")
+    def when_fill_locator(self, css: str, value: str, *opts: str) -> None:
+        self._action_type(value, css, *opts)
+
+    @keyword("And I fill locator \"${css}\" with \"${value}\"")
+    def and_fill_locator(self, css: str, value: str, *opts: str) -> None:
+        self._action_type(value, css, *opts)
+
+    @keyword("When I fill \"${css}\" with \"${value}\"")
+    def when_fill_short(self, css: str, value: str, *opts: str) -> None:
+        self._action_type(value, css, *opts)
+
+    @keyword("And I fill \"${css}\" with \"${value}\"")
+    def and_fill_short(self, css: str, value: str, *opts: str) -> None:
+        self._action_type(value, css, *opts)
 
     @keyword("When I type secret \"${value}\" into locator \"${css}\"")
     def when_type_secret(self, value: str, css: str, *opts: str) -> None:
