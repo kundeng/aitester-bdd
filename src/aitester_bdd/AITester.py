@@ -1855,6 +1855,126 @@ class AITester:
     # Internal access
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Fluid explore keywords (spec 36 — aitester-bdd inception)
+    # ------------------------------------------------------------------
+
+    @keyword("I explore")
+    def i_explore(self, story: str, *args: str) -> str:
+        """Fluid test — agent drives the browser through the story.
+
+        Completion = RF PASS (with step-by-step notes in the log).
+        Blocked = RF FAIL (with bug report as failure message).
+
+        Optional kwargs via RF named args:
+          session=<id>    reuse an existing agent-browser session
+          notes=true      emit journey summary on pass (default: true)
+        """
+        from aitester_bdd.authoring.agent_loop import explore_with_agent
+        from pathlib import Path
+
+        opts = _parse_options(args)
+        session = opts.get("session")
+        emit_notes = opts.get("notes", "true").lower() != "false"
+
+        # Derive base_url from the current scenario or verification
+        base_url = ""
+        if self._v.current_scenario is not None:
+            base_url = self._v.scenarios[self._v.current_scenario].entry_url
+        if not base_url:
+            base_url = "http://localhost:5173"
+
+        result = explore_with_agent(
+            story=_strip_quotes(story),
+            base_url=base_url,
+            session=session,
+            debug=True,
+        )
+
+        if result.passed:
+            if emit_notes and result.notes:
+                logger.info(f"[explore] PASS — journey notes:\n{result.notes}", html=True)
+            return result.notes
+        else:
+            raise AssertionError(
+                f"[explore] FAIL — journey blocked:\n{result.bug_report}"
+            )
+
+    @keyword("I explore and author")
+    def i_explore_and_author(self, story: str, *args: str) -> str:
+        """Fluid test + writes a .robot suite.
+
+        Same as 'I explore' but also produces a pinned/mixed .robot file.
+
+        Required kwargs:
+          output=<path>     where to write the authored suite
+        Optional kwargs:
+          pinning=auto      aggressive | conservative | none | auto (default)
+          session=<id>      reuse an existing agent-browser session
+          notes=true        emit journey summary on pass (default: true)
+        """
+        from aitester_bdd.authoring.agent_loop import author_with_agent
+        from pathlib import Path
+
+        opts = _parse_options(args)
+        output = opts.get("output")
+        if not output:
+            raise ValueError("I explore and author requires output=<path>")
+        pinning = opts.get("pinning", "auto")
+        session = opts.get("session")
+        emit_notes = opts.get("notes", "true").lower() != "false"
+
+        base_url = ""
+        if self._v.current_scenario is not None:
+            base_url = self._v.scenarios[self._v.current_scenario].entry_url
+        if not base_url:
+            base_url = "http://localhost:5173"
+
+        pinning_instruction = ""
+        if pinning == "aggressive":
+            pinning_instruction = "Pin EVERY step to CSS selectors. Emit I define rule blocks. Use I explore only if a stable selector truly cannot be determined."
+        elif pinning == "conservative":
+            pinning_instruction = "Pin only login, navigation, and page chrome. Keep interactions and assertions as I explore calls."
+        elif pinning == "none":
+            pinning_instruction = "Emit ONLY I explore calls capturing the journey structure. No CSS selectors, no I define rule blocks."
+        else:
+            pinning_instruction = "Pin what is structural (login, forms, buttons with data-testid). Keep fluid what is data-dependent (which record, dynamic content, verification of state)."
+
+        full_story = (
+            f"{_strip_quotes(story)}\n\n"
+            f"[PINNING={pinning}] {pinning_instruction}"
+        )
+
+        suite_path = Path(output)
+        triage_dir = suite_path.parent / "triage"
+
+        result = author_with_agent(
+            story=full_story,
+            base_url=base_url,
+            suite_path=suite_path,
+            bug_report_dir=triage_dir,
+            debug=True,
+        )
+
+        if result.suite_path:
+            msg = f"Authored suite written to {result.suite_path}"
+            if emit_notes:
+                logger.info(f"[explore+author] PASS — {msg}", html=True)
+            return msg
+        elif result.bug_report_path:
+            raise AssertionError(
+                f"[explore+author] FAIL — journey blocked. Bug report: {result.bug_report_path}"
+            )
+        else:
+            raise AssertionError(
+                f"[explore+author] FAIL — agent exhausted iterations without completing. "
+                f"Last message: {result.final_message[:500]}"
+            )
+
+    # ------------------------------------------------------------------
+    # Internal access
+    # ------------------------------------------------------------------
+
     def get_verification(self) -> Verification:
         """Access the built-up Verification — used by walker and tests."""
         return self._v

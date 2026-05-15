@@ -65,6 +65,22 @@ class AuthoringResult:
         return self.suite_path is not None or self.bug_report_path is not None
 
 
+@dataclass
+class ExploreResult:
+    """What the explore agent loop produced.
+
+    `passed` = True means the agent completed the journey without reporting
+    a bug.  `notes` is the human-readable step-by-step summary.
+    `bug_report` is set when the agent couldn't complete the journey.
+    """
+
+    passed: bool = False
+    notes: str = ""
+    bug_report: str = ""
+    iterations: int = 0
+    final_message: str = ""
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────
 
 
@@ -313,6 +329,142 @@ def _author_once(
         final_message=final_message,
         transcript=transcript,
     )
+
+
+# ─── Explore (fluid test) ────────────────────────────────────────────
+
+
+def explore_with_agent(
+    *,
+    story: str,
+    base_url: str,
+    session: Optional[str] = None,
+    source_root: Optional[Path] = None,
+    max_iters: int = DEFAULT_MAX_ITERS,
+    debug: bool = False,
+) -> "ExploreResult":
+    """Run the agent loop in explore mode — fluid test, no suite output.
+
+    The agent drives the browser through the story.  Completion = PASS
+    (with notes), blocked = FAIL (with bug report).
+
+    If `session` is provided, the agent reuses that agent-browser session.
+    Otherwise a fresh session is created.
+    """
+    from deepagents import create_deep_agent
+    from deepagents.backends import LocalShellBackend
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from aitester_bdd.authoring.tools import (
+        build_explore_tools, get_explore_result, _reset_explore_state,
+        session_id,
+    )
+
+    _reset_explore_state()
+
+    llm = _build_llm()
+    tools = build_explore_tools()
+    system_prompt = load_skill()
+
+    browser_session = session or session_id()
+
+    backend_env = dict(os.environ)
+    backend_env["AGENT_BROWSER_SESSION"] = browser_session
+
+    backend = LocalShellBackend(
+        root_dir=str(source_root) if source_root else None,
+        env=backend_env,
+        inherit_env=True,
+        timeout=120,
+        max_output_bytes=200_000,
+    )
+
+    agent = create_deep_agent(
+        model=llm,
+        tools=tools,
+        system_prompt=system_prompt,
+        backend=backend,
+        checkpointer=InMemorySaver(),
+    )
+
+    user_message = (
+        f"Story: {story}\n\n"
+        f"Base URL: {base_url}\n\n"
+        f"You are EXPLORING — performing a fluid test of this story against the live app.\n\n"
+        f"Your job: drive the browser through the described journey. "
+        f"Snapshot the page, interact with it, verify outcomes — exactly as "
+        f"a human operator would.\n\n"
+        f"## agent-browser cheatsheet (inline — do NOT run --help)\n\n"
+        f"```\n"
+        f"agent-browser open <url> --json\n"
+        f"agent-browser snapshot -c -i --json\n"
+        f"agent-browser get count '<css>' --json\n"
+        f"agent-browser get text '<css>' --json\n"
+        f"agent-browser click '<css|@ref>' --json\n"
+        f"agent-browser fill '<css>' '<text>' --json\n"
+        f"agent-browser type '<css>' '<text>' --json\n"
+        f"agent-browser press '<key>' --json\n"
+        f"agent-browser wait '<css>'|<ms> --json\n"
+        f"agent-browser eval '<js>' --json\n"
+        f"agent-browser find <locator> <value> <action> [text] --json\n"
+        f"```\n\n"
+        f"Chain commands with `&&` in one execute call.\n\n"
+        f"## Rules\n\n"
+        f"  - Complete the journey end-to-end. Do not stop early.\n"
+        f"  - If the system is broken (page won't render, element missing, "
+        f"action fails after retries), call journey_blocked.\n"
+        f"  - If you complete the full journey successfully, call journey_complete "
+        f"with a step-by-step summary of what you did and observed.\n\n"
+        f"Begin."
+    )
+
+    slug = _slugify(story)[:60] or "explore"
+    thread_id = f"explore-{slug}"
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": max_iters * 4}
+
+    try:
+        if debug:
+            result = _invoke_with_debug_stream(agent, user_message, config)
+        else:
+            result = agent.invoke(
+                {"messages": [{"role": "user", "content": user_message}]},
+                config=config,
+            )
+    except Exception as exc:
+        log.exception("explore agent loop failed")
+        return ExploreResult(
+            passed=False,
+            bug_report=f"agent loop crashed: {type(exc).__name__}: {exc}",
+            iterations=0,
+            final_message=str(exc),
+        )
+
+    messages = result.get("messages", []) if isinstance(result, dict) else []
+    notes, bug = get_explore_result()
+
+    if notes:
+        return ExploreResult(
+            passed=True,
+            notes=notes,
+            iterations=len(messages),
+            final_message=notes,
+        )
+    elif bug:
+        return ExploreResult(
+            passed=False,
+            bug_report=bug,
+            iterations=len(messages),
+            final_message=bug,
+        )
+    else:
+        last = messages[-1] if messages else None
+        final_message = str(getattr(last, "content", "")) if last is not None else ""
+        return ExploreResult(
+            passed=False,
+            bug_report=f"Agent exhausted {len(messages)} iterations without completing the journey.",
+            iterations=len(messages),
+            final_message=final_message,
+        )
 
 
 # ─── Debug streaming ─────────────────────────────────────────────────

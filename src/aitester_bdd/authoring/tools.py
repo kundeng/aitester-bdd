@@ -106,6 +106,68 @@ def _report_bug(path: str, content: str) -> str:
         return f"ERROR: {type(exc).__name__}: {exc}"
 
 
+# ─── Explore-mode terminal tools ─────────────────────────────────────────
+
+
+class JourneyCompleteParams(BaseModel):
+    notes: str = Field(description="Step-by-step summary of what you did and observed. Include selectors clicked, values typed, toasts seen, state verified.")
+
+
+class JourneyBlockedParams(BaseModel):
+    report: str = Field(description="What you tried, what you observed, why the journey could not be completed.")
+
+
+_explore_notes: Optional[str] = None
+_explore_bug: Optional[str] = None
+
+
+def _reset_explore_state() -> None:
+    global _explore_notes, _explore_bug
+    _explore_notes = None
+    _explore_bug = None
+
+
+def _journey_complete(notes: str) -> str:
+    global _explore_notes
+    _explore_notes = notes
+    return f"EXPLORE_DONE: passed=true\n{notes}"
+
+
+def _journey_blocked(report: str) -> str:
+    global _explore_bug
+    _explore_bug = report
+    return f"EXPLORE_DONE: passed=false\n{report}"
+
+
+def get_explore_result() -> tuple[Optional[str], Optional[str]]:
+    """Read the explore terminal state. Returns (notes, bug_report)."""
+    return _explore_notes, _explore_bug
+
+
+def build_explore_tools() -> list[StructuredTool]:
+    """Terminal tools for explore mode (no suite writing)."""
+    return [
+        StructuredTool.from_function(
+            func=_journey_complete, name="journey_complete",
+            args_schema=JourneyCompleteParams,
+            description=(
+                "TERMINAL TOOL. Call when you have successfully completed "
+                "the entire journey described in the story. Provide a "
+                "step-by-step summary of what you did and observed."
+            ),
+        ),
+        StructuredTool.from_function(
+            func=_journey_blocked, name="journey_blocked",
+            args_schema=JourneyBlockedParams,
+            description=(
+                "TERMINAL TOOL. Call when the journey cannot be completed — "
+                "the page doesn't render, a required element is missing, or "
+                "an action fails. Describe what you tried and what blocked you."
+            ),
+        ),
+    ]
+
+
 # ─── Tool factory ────────────────────────────────────────────────────────
 
 
