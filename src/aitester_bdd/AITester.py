@@ -1635,6 +1635,57 @@ class AITester:
     def _evaluate_js(self, script: str) -> None:
         self._current_rule().items.append(Action("js", value=_strip_quotes(script)))
 
+    # ------------------------------------------------------------------
+    # Actions — Shell (escape hatch for cleanup, git ops, audit scripts)
+    # ------------------------------------------------------------------
+    # Use sparingly — most assertions belong in declarative state-check
+    # keywords. Shell is the right tool when you genuinely need to run
+    # a process whose exit code or stdout is what you're asserting on
+    # (e.g. `make audit` returning 0, a git-reset in test teardown,
+    # `pytest --collect-only` returning a specific count, etc.).
+
+    def _run_shell(self, cmd: str, timeout_ms: str = "60000") -> None:
+        self._current_rule().items.append(
+            Action("shell", target=_strip_quotes(cmd), options={"timeout_ms": str(timeout_ms)})
+        )
+
+    @keyword("When I run shell \"${cmd}\"")
+    def when_run_shell(self, cmd: str) -> None: self._run_shell(cmd)
+    @keyword("And I run shell \"${cmd}\"")
+    def and_run_shell(self, cmd: str) -> None: self._run_shell(cmd)
+    @keyword("When I run shell \"${cmd}\" with timeout ${ms} ms")
+    def when_run_shell_timeout(self, cmd: str, ms: str) -> None: self._run_shell(cmd, ms)
+
+    def _last_shell_exit(self, code: str) -> None:
+        self._current_rule().items.append(StateCheck("last_shell_exit", expected=str(code)))
+
+    @keyword("Given last shell exit equals ${code}")
+    def given_last_shell_exit(self, code: str) -> None: self._last_shell_exit(code)
+    @keyword("And last shell exit equals ${code}")
+    def and_last_shell_exit(self, code: str) -> None: self._last_shell_exit(code)
+    @keyword("Then last shell exit equals ${code}")
+    def then_last_shell_exit(self, code: str) -> None: self._last_shell_exit(code)
+
+    def _last_shell_stdout_contains(self, text: str) -> None:
+        self._current_rule().items.append(StateCheck("last_shell_stdout_contains", expected=_strip_quotes(text)))
+
+    @keyword("Given last shell stdout contains \"${text}\"")
+    def given_last_shell_stdout_contains(self, text: str) -> None: self._last_shell_stdout_contains(text)
+    @keyword("And last shell stdout contains \"${text}\"")
+    def and_last_shell_stdout_contains(self, text: str) -> None: self._last_shell_stdout_contains(text)
+    @keyword("Then last shell stdout contains \"${text}\"")
+    def then_last_shell_stdout_contains(self, text: str) -> None: self._last_shell_stdout_contains(text)
+
+    def _last_shell_stderr_contains(self, text: str) -> None:
+        self._current_rule().items.append(StateCheck("last_shell_stderr_contains", expected=_strip_quotes(text)))
+
+    @keyword("Given last shell stderr contains \"${text}\"")
+    def given_last_shell_stderr_contains(self, text: str) -> None: self._last_shell_stderr_contains(text)
+    @keyword("And last shell stderr contains \"${text}\"")
+    def and_last_shell_stderr_contains(self, text: str) -> None: self._last_shell_stderr_contains(text)
+    @keyword("Then last shell stderr contains \"${text}\"")
+    def then_last_shell_stderr_contains(self, text: str) -> None: self._last_shell_stderr_contains(text)
+
     @keyword("When I evaluate js \"${script}\"")
     def when_evaluate_js(self, script: str) -> None: self._evaluate_js(script)
     @keyword("And I evaluate js \"${script}\"")

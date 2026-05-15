@@ -255,6 +255,17 @@ def _eval_state_check(
         obs = browser.last_response_body()
         return (expected in obs, f"contains {expected!r}", obs[:200])
 
+    # ── Shell — pairs with `When I run shell "<cmd>"` action ──────────
+    if kind == "last_shell_exit":
+        obs = getattr(browser, "_last_shell_exit", None)
+        return (obs == int(expected), expected, str(obs))
+    if kind == "last_shell_stdout_contains":
+        obs = getattr(browser, "_last_shell_stdout", "")
+        return (expected in obs, f"stdout contains {expected!r}", obs[:200])
+    if kind == "last_shell_stderr_contains":
+        obs = getattr(browser, "_last_shell_stderr", "")
+        return (expected in obs, f"stderr contains {expected!r}", obs[:200])
+
     # ── API direct (httpx) ─────────────────────────────────────────────
     if kind == "api_returns":
         return _eval_api_returns(extra.get("path", ""), extra.get("field", ""), expected)
@@ -476,6 +487,22 @@ def _eval_action(browser: BrowserAdapter, action: "Action", *, scope: str = "") 
         browser.browser_step(action.target, action.options.get("args", []))
     elif kind == "call_keyword":
         browser.call_keyword(action.target, action.options.get("args", []))
+    elif kind == "shell":
+        # Run a shell command; record exit code + stdout for downstream
+        # `last shell exit equals N` / `last shell stdout contains "X"`
+        # state checks. Captures up to 100KB stdout/stderr.
+        import subprocess as _sp
+        cmd = action.target or ""
+        timeout_s = int((action.options or {}).get("timeout_ms", "60000")) / 1000.0
+        try:
+            r = _sp.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout_s)
+            browser._last_shell_exit = r.returncode
+            browser._last_shell_stdout = (r.stdout or "")[:100_000]
+            browser._last_shell_stderr = (r.stderr or "")[:100_000]
+        except _sp.TimeoutExpired:
+            browser._last_shell_exit = -1
+            browser._last_shell_stdout = ""
+            browser._last_shell_stderr = f"timed out after {timeout_s}s"
     else:
         log.warning("unknown action %s", kind)
 
