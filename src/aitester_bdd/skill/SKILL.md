@@ -79,8 +79,10 @@ agent-browser get attr '@e3' 'data-testid' --json
 agent-browser get text '.justify-end .rounded-2xl' --json
 
 # Locate-and-act in one Playwright-style call (no CSS synthesis)
-agent-browser find role textbox "Username" fill admin
-agent-browser find role button "Sign in" click
+agent-browser find placeholder "Username" fill admin
+agent-browser find role button click --name "Sign in"
+agent-browser find label "Email" fill user@example.com
+agent-browser find testid login-form click
 
 # Wait for an element to appear OR ms-sleep
 agent-browser wait '[data-testid="chat-input"]'
