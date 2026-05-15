@@ -93,7 +93,7 @@ attribute for the `.robot` file.
 | `browser_get(what, target='')` | Read state: `what ∈ {text, html, value, count, url, title}`. `target` is `@ref` or CSS (ignored for url/title). |
 | `browser_get_attr(target, name)` | **Your ref→CSS bridge.** Resolve an `@ref` (or CSS) to a single DOM attribute (`data-testid`, `aria-label`, `id`, `name`, `placeholder`, `href`). Returns `''` when unset. Call this for the highest-priority stable attribute and emit it in the suite. |
 | `browser_wait(target)` | Wait for a CSS selector to attach/become visible OR sleep N ms (string `"5000"`). Use this for SSE streams, late-rendered tool cards, transitions — NEVER use a raw timing trick. |
-| `browser_validate_selector(css, scope='', expected='unique')` | **REQUIRED BEFORE WRITING ANY SELECTOR INTO .robot.** Validates against the live page; returns count + ok + suggestion + brittleness warning. See § "Validate every selector before you write it". |
+| `browser_validate_selector(css, scope='', expected='unique')` | Confirm the selector against the live page before writing it. Returns count + ok + suggestion + brittleness warning. |
 | `browser_screenshot(path)` | Save PNG. |
 | `read_file(path)` | (white-box mode only) Read a source file under the configured source_root — useful for finding `data-testid` declarations or route mounts in the source code. |
 
@@ -118,141 +118,28 @@ all accept CSS:
 This pattern keeps exploration cheap (refs + intent are short) and
 the suite portable (CSS runs on every backend).
 
-### Selector priority (non-negotiable)
+### Selectors
 
-When constructing a CSS selector from a `browser_snapshot` entry, pick
-the most stable available attribute in this order:
+Pick what's in the snapshot — `data-testid`, `aria-label`, `id`,
+`name`, `placeholder`, stable class, text. Don't invent attributes the
+snapshot doesn't show. `browser_validate_selector` confirms count and
+flags brittleness; the framework's pipe-fallback (`"a | b | c"`)
+absorbs minor drift. If you can't ground a selector against live DOM
+after a snapshot + `browser_get(what='html', target='...')`, write a
+bug report (§ 1.2) instead of guessing.
 
-1. **`[data-testid="..."]`** — most stable; never inferred, always real
-2. **`role+name`** — for buttons/links with accessible names
-3. **`[aria-label="..."]`**
-4. **`[id="..."]`** when not auto-generated (avoid `id="r:0:"` etc.)
-5. **`[name="..."]`** for form inputs
-6. **`[placeholder="..."]`** when nothing better
-7. Stable class (no `Mui-...-12345`-style hash)
-8. Visible text via `:has-text("...")` — last resort
+### Pipe-fallback selectors
 
-### Selector anti-patterns and robust authoring
-
-The agent (you) **must avoid** these failure modes — they pass dryrun
-but break at run time:
-
-**Don't compound multiple Tailwind/utility classes.** When `browser_snapshot`
-shows `<div class="prose prose-sm dark:prose-invert break-words max-h-80
-overflow-hidden">`, **do NOT** author `div.prose.max-h-80` — `max-h-80`
-is conditional (only present when content is long+collapsed). Pick ONE
-distinctive class:
-
-| Bad | Why bad | Good |
-|-----|---------|------|
-| `div.prose.max-h-80` | `max-h-80` is conditional | `div.prose-sm` |
-| `button.bg-primary.rounded-2xl.px-4` | three Tailwind utilities; any may shift | `button[type=submit]` |
-| `div.flex.justify-end.gap-2.mt-4` | utility soup | `div.justify-end` (if distinctive) or just the inner content |
-
-If you don't know which class is conditional, **use containment**:
-`[class*="prose-sm"]` matches as long as `prose-sm` appears anywhere in
-the class list, robust to siblings being added/removed.
-
-**Prefer pipe-fallback when uncertain.** The runtime resolves
-`a | b | c` to "the first selector that matches on the live page" —
-use this when an element might be reachable via one of several
-attributes:
+The runtime resolves `a | b | c` to "the first selector that matches on
+the live page" — use sparingly when an element might be reachable via
+one of several attributes:
 
 ```robot
-# data-testid preferred; fall back to a stable id, then a class
 When I click locator "[data-testid=submit-btn] | #submit | button.primary"
-
-# match either the old or new layout's user message bubble
-Then locator ".justify-end .bg-primary | [data-testid=user-msg]" contains "Hello"
 ```
 
-Use this sparingly — every fallback is a maintenance hint that the
-selector is fragile. Prefer asking the SUT team to add a `data-testid`
-(write a **bug report** if testids are missing on a critical element).
-
-**Compound selectors are OK when they target uniquely.** `.justify-end
-.bg-primary.rounded-2xl` (parent + child class) is fine if both halves
-are stable. The anti-pattern is compounding *peer* Tailwind classes
-that may individually disappear.
-
-### A good selector is unique, robust, and scoped
-
-Three properties — they reinforce each other, none is optional:
-
-- **Unique.** Exactly one element matches (`count == 1`) for
-  click/type/observe targets. For table rows / list items, `count >= 1`.
-  A non-unique selector is the #1 source of false-pass + false-fail
-  flakiness — Playwright's `.first` masks the bug at runtime.
-- **Robust.** Keys on a stable attribute (`data-testid`, `aria-label`,
-  semantic role, `id`, `name`, `href`) rather than visual class soup
-  that shifts with theme/variant changes.
-- **Scoped.** When a selector isn't unique page-wide but IS unique
-  inside a card / panel / row, use `And I scope children to "${parent}"`
-  to narrow the context. Scoping turns "the second button" into
-  "the only button inside the case-detail card" — far more readable
-  and survives layout reflow.
-
-### Validate every selector before you write it
-
-Before you put a CSS selector into the `.robot` suite, call
-`browser_validate_selector(css, scope, expected)`. It runs the
-selector against the live page and returns:
-
-```
-{
-  "candidate": "<css under scope>",
-  "count": 1,
-  "expected": "unique",
-  "ok": true,
-  "stable_attrs": {"data-testid": "submit-btn"},
-  "classes": ["px-4", "py-2", "bg-blue-600"],
-  "text": "Submit"
-}
-```
-
-Read it like this:
-
-- `ok: false, count: 0` → selector doesn't match. Re-snapshot, the
-  element may not be rendered (add an `await`), or the spelling is
-  wrong.
-- `ok: false, count > 1` → not unique. The report's `suggestion` field
-  names a stable attribute to tighten to (e.g. `tighten to
-  [data-testid="submit-btn"]`). If no stable attr is available, add a
-  parent scope.
-- `warning: "selector is built only from Tailwind utility classes"` →
-  brittle. Replace with a semantic anchor.
-- For pipe-fallback (`a | b | c`), each candidate is validated
-  independently — the report is one entry per candidate.
-
-`expected` values:
-- `"unique"` (default) — for click, type, single-element observations
-- `"many"` — for table rows, list items, expansion targets
-- `"absent"` — for negation/disappearance asserts (`But selector ...
-  does not exist`)
-
-This is **fast** (one tool call per selector) and catches every
-"oops, that matches three things" mistake before the suite ships.
-
-### Post-authoring validate-refine pass (lightweight)
-
-After you've drafted the `.robot` body but BEFORE calling
-`write_robot_suite`, do a quick sanity sweep:
-
-1. For each selector you put in the suite, run
-   `browser_validate_selector` once more — confirm `ok: true`.
-2. If any selector now reports `ok: false` (state may have changed
-   during exploration), fix it in place: tighten the attribute, add
-   scope, or escalate to a bug report if the element is genuinely
-   missing.
-3. Only then call `write_robot_suite`. The runtime walker will
-   resolve pipe-fallbacks and scopes the same way the validator did,
-   so a green validation == a green run (modulo timing, which you
-   handle with `await=`).
-
-Keep the refinement minimal — this is a "second look" pass, not a
-rewrite. If a selector required more than one fix, that's a signal
-the underlying page contract is unstable and a bug report may be the
-right exit.
+Every fallback is a hint the selector is fragile; if a critical element
+lacks a stable anchor, write a bug report.
 
 ### Exploration-first rule (non-negotiable)
 
@@ -917,8 +804,6 @@ I define rule "approve_persists"
 
 ### 6.4 Observation gates (async dependencies)
 
-**An action rule asserts its own immediate effect, not deferred completion.** If the action triggers async backend work (send chat, submit form, start a job), the action rule's body can verify the *user input landed* (bubble appears, form clears, button disables) — but **completion of the deferred work goes in a child rule** with `set rule timeout`. Mixing the two makes a slow backend look like a broken action.
-
 **Never use `When I wait ${ms} ms`.** Three patterns:
 
 **Option A — Split rules** (named state transitions worth their own milestone):
@@ -1105,45 +990,7 @@ Record each as a pair: triggering action + completion selector. These become obs
 | `examples/quickstart/login_smoke.robot` | Minimal working example — login + open case + verify renders |
 | `engine/README.md` | The walker's gotcha-fix map (what it handles for you at run time) |
 
-## 11 — Common Explore patterns (Playwright tools)
-
-```text
-# Discover what's at the entry URL
-browser_open("${BASE_URL}")
-browser_snapshot()
-  → Reads: list of <input>, <button>, <a>, [data-testid=...], etc.
-    with their REAL attributes (data-testid, placeholder, aria-label,
-    id, name, type, role, class). Pick selectors from these.
-
-# Drive an auth flow before the actual test surface exists
-browser_open("${BASE_URL}/#/login")
-browser_snapshot()             # find the real input attributes
-browser_type("[selector chosen from snapshot]", "admin")
-browser_type("[selector chosen from snapshot]", "admin")
-browser_click("[selector chosen from snapshot]")
-browser_snapshot()             # confirm the post-login page
-
-# Reach the page the story is about, snapshot every transition
-browser_open("${BASE_URL}/#/case/MAIN-0168")
-browser_snapshot()
-
-# When an element's full attribute set isn't surfaced by snapshot
-browser_get_html("[role=dialog]")    # see the full subtree
-browser_get_attr("[data-testid=approve-btn]", "aria-disabled")
-
-# Probe an interactive element you intend to use in the suite
-browser_get_count("[data-testid=case-approve]")
-
-# Take a screenshot if you'll need a visual_semantic check
-browser_screenshot("/tmp/aitester-shot.png")
-```
-
-After each `browser_snapshot`, note: the selectors you'll use (pulled
-from the actual attributes shown), the URL the SPA is now on, the text
-of elements you'll assert against. Only THEN open the editor and call
-`write_robot_suite`.
-
-## 12 — Emit: intention-driven, never auto-dumped
+## 11 — Emit: intention-driven, never auto-dumped
 
 The walker has an **explicit emit** primitive — `And I emit "${name}"` —
 that captures structured page state into `<output_dir>/emit.jsonl` at
@@ -1202,35 +1049,7 @@ costs one or more page queries.
 
 ---
 
-## 13 — Failure diagnosis: an AOP aspect, not your concern
-
-When a rule fails, the walker's AOP `diagnose` aspect fires automatically:
-
-1. Hands the LLM (same `cc/claude-opus-4-7` backend by default) the
-   verification + scenario + rule + failed step + expected/observed +
-   the **full MDP trajectory** recorded by the `trajectory` aspect.
-2. Asks: "why did this rule likely fail? Is the cause in the SUT or
-   in the test?"
-3. Writes the answer to `RuleResult.ai_diagnosis` (shown in the
-   verdict output) AND appends a structured record to
-   `<output_dir>/failures.jsonl`.
-
-You do not need to instrument anything for this. The diagnose aspect is
-always on. Disable via `AITESTER_DISABLE_ASPECTS=diagnose` if running in
-a CI environment without an LLM endpoint.
-
-Persistence summary (all paths honor `AITESTER_EMIT_DIR`, falling back
-to RF's `${OUTPUT_DIR}` or cwd):
-
-| File | Written by | Purpose |
-|------|-----------|---------|
-| `emit.jsonl` | explicit `And I emit "..."` | structured page-state captures for diagnostic/probe suites |
-| `walk_log.jsonl` | `trajectory` aspect | every MDP transition (rule_enter, before/after_action, state_check, dismiss, emit, rule_exit) — full episode record |
-| `failures.jsonl` | `diagnose` aspect | one record per rule failure with the AI-written diagnosis + the deterministic failure context |
-
----
-
-## 14 — When to file a bug report instead
+## 12 — When to file a bug report instead
 
 You write `triage/<story-slug>.md` (NOT a `.robot` suite) when any of these is true after a real exploration attempt:
 
