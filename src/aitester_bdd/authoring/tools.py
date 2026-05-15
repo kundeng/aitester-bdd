@@ -306,18 +306,23 @@ def browser_snapshot(scope: str = "", depth: int = 0) -> str:
     """Accessibility-tree snapshot of the current page (or scope).
 
     Returns a YAML-style tree of interactive elements with their roles,
-    accessible names, and `@ref` markers you can pass to other tools.
-    Example:
+    accessible LABELS, and `@ref` markers.
 
-        - textbox "Username" [ref=e1]
-        - textbox "Password" [ref=e2]
-        - button "Sign in" [ref=e3]
+    Format:
+        - textbox label="Username" [ref=e1]
+        - textbox label="Password" [ref=e2]
+        - button label="Sign in" [ref=e3]
 
-    `@refs` are ephemeral — they last only until the next snapshot. The
-    accompanying ref map (`{e1: {role, name}, ...}`) tells you what each
-    one is. Use `browser_get_attr(@ref, '<attr>')` to materialize a
-    stable CSS attribute (`data-testid`, `aria-label`, `id`, `name`) for
-    the authored suite.
+    The `label=...` value is the element's **accessible name** (text content,
+    aria-label, placeholder — whatever Playwright/axe-core reports). It is
+    NOT the HTML `name=...` attribute. Writing `input[name="Username"]`
+    from this snapshot is wrong unless you call `browser_get_attr(@ref, 'name')`
+    first and confirm the HTML attribute matches.
+
+    `@refs` are ephemeral — valid until the next snapshot. Use
+    `browser_get_attr(@ref, '<attr>')` to materialize a stable CSS
+    attribute (`data-testid`, `aria-label`, `id`, `name`, `placeholder`)
+    before authoring it into the .robot suite.
 
     Call after every navigation or action that changes the page.
     """
@@ -334,10 +339,20 @@ def browser_snapshot(scope: str = "", depth: int = 0) -> str:
     refs = data.get("refs", {})
     if not snap:
         return "(empty snapshot — no interactive elements)"
+    # Rewrite `role "Name"` → `role label="Name"` so the LLM doesn't
+    # mistake the accessible name for an HTML attribute value. The raw
+    # agent-browser output uses `- role "Name"` which is ambiguous.
+    import re as _re
+    snap = _re.sub(
+        r'^(\s*-\s+\w+)\s+"([^"]*)"\s+(\[ref=)',
+        r'\1 label="\2" \3',
+        snap,
+        flags=_re.MULTILINE,
+    )
     # Inline a compact ref map at the end so the LLM can correlate.
     if refs:
         ref_lines = "\n".join(
-            f"  {k}: role={v.get('role')} name={v.get('name')!r}"
+            f"  {k}: role={v.get('role')} label={v.get('name')!r}"
             for k, v in refs.items()
         )
         return f"{snap}\n\n[refs]\n{ref_lines}"
