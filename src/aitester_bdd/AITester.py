@@ -646,6 +646,16 @@ class AITester:
     def and_set_rule_timeout(self, ms: str) -> None: self._set_rule_timeout(ms)
     @keyword("When I set rule timeout ${ms}")
     def when_set_rule_timeout(self, ms: str) -> None: self._set_rule_timeout(ms)
+    # Variadic fallback — handles Robot multi-space separator (each cell
+    # becomes its own arg).
+    @keyword("And I set rule timeout")
+    def and_set_rule_timeout_variadic(self, *args: str) -> None:
+        if not args: return
+        self._set_rule_timeout(" ".join(args))
+    @keyword("When I set rule timeout")
+    def when_set_rule_timeout_variadic(self, *args: str) -> None:
+        if not args: return
+        self._set_rule_timeout(" ".join(args))
 
     @keyword("And I scope children to \"${css}\"")
     def set_child_scope(self, css: str) -> None:
@@ -1745,6 +1755,16 @@ class AITester:
     def when_evaluate_js_bare(self, script: str) -> None: self._evaluate_js(script)
     @keyword("And I evaluate js ${script}")
     def and_evaluate_js_bare(self, script: str) -> None: self._evaluate_js(script)
+    # Variadic — handles Robot multi-space / continuation-line joining
+    # where the script body comes through as multiple cells.
+    @keyword("When I evaluate js")
+    def when_evaluate_js_variadic(self, *args: str) -> None:
+        if not args: return
+        self._evaluate_js(" ".join(args))
+    @keyword("And I evaluate js")
+    def and_evaluate_js_variadic(self, *args: str) -> None:
+        if not args: return
+        self._evaluate_js(" ".join(args))
 
     # ------------------------------------------------------------------
     # Internal access
