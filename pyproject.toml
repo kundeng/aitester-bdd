@@ -21,27 +21,20 @@ classifiers = [
     "Topic :: Software Development :: Testing :: BDD",
 ]
 dependencies = [
+    # Robot Framework — runtime test executor for the .robot suites the
+    # authoring agent emits.
     "robotframework>=7.0",
-    # rfbrowser is the in-process Playwright RUNTIME backend. Optional in
-    # practice (other runtime backends work), but kept in base deps because
-    # most suites declare it.
-    "robotframework-browser>=18.0",
-    # Authoring-time explorer: Playwright Python sync API.
-    # The agent drives a real Playwright browser to take CSS-grounded
-    # snapshots (returns each element's actual data-testid / aria-label /
-    # placeholder / id / name / class) — no inferred selectors.
-    "playwright>=1.45",
-    # In-walker semantic / visual_semantic escape hatch (one-shot LLM call,
-    # no tools needed at run time) — keep litellm as the simple multi-provider
-    # client.
-    "litellm>=1.50",
-    # Authoring-time agent loop — same pattern as prismi3's aitester.
-    # DeepAgents wraps langgraph and gives us a ready-made tool-calling
-    # ReAct loop; we don't roll our own.
+    # Authoring-time agent loop. DeepAgents wraps LangGraph and provides
+    # TodoList + Filesystem + Shell tools out of the box. The agent shells
+    # out to the `agent-browser` CLI for the live browser work — no Python
+    # Playwright dependency in the base install.
     "deepagents>=0.0.15",
     "langgraph>=0.2.50",
     "langchain>=0.3",
     "langchain-openai>=0.2",
+    # In-walker semantic / visual_semantic escape hatch (one-shot LLM call,
+    # no tools at run time) — litellm is the simple multi-provider client.
+    "litellm>=1.50",
     "pydantic>=2.0",
     "typer>=0.12",
     "pyyaml>=6.0",
@@ -54,13 +47,21 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
 ]
-# Optional nodriver backend — raw CDP via Chrome/Edge.
-# Useful for two cases:
-#   1. Bot-detected sites (DataDome, Cloudflare, etc.) — no Playwright
-#      fingerprint, so detection heuristics that target Playwright miss.
-#   2. Environments where `rfbrowser init` (downloads ~300MB of browsers)
-#      is undesirable — nodriver uses any Edge/Chrome already on PATH.
-# Enable by installing this extra AND setting AITESTER_BROWSER=nodriver.
+# Playwright runtime backend (in-process). Pick this when subprocess latency
+# matters for action-heavy suites. Install + run once:
+#   pip install aitester-bdd[playwright]
+#   rfbrowser init       # downloads ~300MB of browsers
+# Then declare ${ENGINE}    playwright in your suite.
+playwright = [
+    "robotframework-browser>=18.0",
+    "playwright>=1.45",
+]
+# nodriver runtime backend — raw CDP via Chrome/Edge.
+# Useful for:
+#   1. Bot-detected sites (DataDome / Cloudflare BM / etc.) — no Playwright
+#      fingerprint, so detection heuristics targeting Playwright miss.
+#   2. Environments where rfbrowser init's ~300MB browser download is undesirable.
+# Pick by installing this extra and declaring ${ENGINE}    nodriver in your suite.
 stealth = [
     "nodriver>=0.40",
 ]

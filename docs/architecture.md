@@ -6,9 +6,15 @@
 ┌──────────────────────────────────────────────────────────────────┐
 │  Authoring (LLM-in-the-loop, one-shot per suite)                 │
 │  ─────────────────────────────────────────────────────────────   │
-│  • Discovery: read app → propose suite skeleton                  │
-│  • Author: story + snapshot + skill → .robot file                │
-│  • Refine: dryrun-fail + fresh snapshot → patched .robot file    │
+│  DeepAgents loop on top of LangGraph:                            │
+│    - SKILL.md as system prompt                                   │
+│    - TodoListMiddleware (planning) + LocalShellBackend (execute) │
+│    - Tool surface: `execute` (bash) + write_robot_suite +        │
+│      report_bug. No per-operation Python wrappers — the agent    │
+│      shells out to `agent-browser <subcommand> --json`,          │
+│      batching with `&&`.                                         │
+│  Retry harness wraps the inner loop (max_attempts, default 2)    │
+│  so a crash / recursion-limit retries with feedback.             │
 └──────────────────────────────────────────────────────────────────┘
                               │
                               │ produces
@@ -17,8 +23,12 @@
 │  Runtime (deterministic, no LLM)                                 │
 │  ─────────────────────────────────────────────────────────────   │
 │  • Robot Framework parses + walks the .robot file                │
-│  • aitester-bdd keyword library: rule DAG, observation gates     │
-│  • robotframework-browser: drives Playwright                     │
+│  • aitester-bdd keyword library: rule DAG, observation gates,    │
+│    position-determined state checks, retry-with-redo guards      │
+│  • One of three browser backends (declared via ${ENGINE}):       │
+│      - agent-browser (default) — CLI subprocess, zero install    │
+│      - playwright (in-process) — install rfbrowser + browsers    │
+│      - nodriver (raw CDP) — bot-detection-resistant              │
 └──────────────────────────────────────────────────────────────────┘
                               │
                               │ emits
