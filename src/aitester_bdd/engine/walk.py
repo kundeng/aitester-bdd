@@ -155,6 +155,30 @@ def _eval_state_check(
         ok = browser.wait_for_elements_state(css_resolved, "detached", timeout_ms=timeout_ms)
         return (ok, f"selector {css!r} does not exist", "absent" if ok else "present")
 
+    # ── Table headers ──────────────────────────────────────────────────
+    if kind == "table_headers":
+        # expected is pipe-delimited; locator scopes to a specific <table>
+        # (defaults to "table"). Read the first <thead>/<tr>'s <th> cells.
+        want = [h.strip() for h in expected.split("|")]
+        # Concatenated header text via `<table> thead th` (preferred) or
+        # fall back to `<table> tr:first-child th`.
+        head_sel = f"{css_resolved} thead th"
+        try:
+            if browser.get_count(head_sel) == 0:
+                head_sel = f"{css_resolved} tr:first-child th"
+            # Read N cells in order.
+            got: list[str] = []
+            for i in range(len(want)):
+                try:
+                    cell_text = browser.get_text(f"{head_sel}:nth-of-type({i+1})").strip()
+                except Exception:
+                    cell_text = ""
+                got.append(cell_text)
+            ok = got == want
+            return (ok, f"table headers {want!r}", repr(got))
+        except Exception as exc:
+            return (False, f"table headers {want!r}", f"error: {exc}")
+
     # ── Counts ─────────────────────────────────────────────────────────
     if kind == "count_eq":
         obs = browser.get_count(css_resolved)

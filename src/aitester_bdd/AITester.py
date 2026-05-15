@@ -782,6 +782,23 @@ class AITester:
     def then_count_at_most(self, css: str, n: str) -> None: self._count_at_most(css, n)
 
     # ------------------------------------------------------------------
+    # State Checks — Table headers (WISE parity)
+    # ------------------------------------------------------------------
+
+    def _table_headers(self, headers: str) -> None:
+        # `headers` is pipe-delimited: "Col 1 | Col 2 | Col 3"
+        self._current_rule().items.append(
+            StateCheck("table_headers", locator="table", expected=_strip_quotes(headers))
+        )
+
+    @keyword("Given table headers are \"${headers}\"")
+    def given_table_headers(self, headers: str) -> None: self._table_headers(headers)
+    @keyword("And table headers are \"${headers}\"")
+    def and_table_headers(self, headers: str) -> None: self._table_headers(headers)
+    @keyword("Then table headers are \"${headers}\"")
+    def then_table_headers(self, headers: str) -> None: self._table_headers(headers)
+
+    # ------------------------------------------------------------------
     # State Checks — Element Text
     # ------------------------------------------------------------------
 
