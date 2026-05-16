@@ -409,14 +409,20 @@ def explore_with_agent(
         checkpointer=InMemorySaver(),
     )
 
+    # Count numbered steps (1), 2), etc.) or sentences ending with periods
+    import re
+    numbered = re.findall(r'\d+\)', story)
+    step_count = len(numbered) if numbered else len([s for s in story.split('.') if s.strip()])
+
     user_message = (
-        f"Story: {story}\n\n"
+        f"Story ({step_count} steps): {story}\n\n"
         f"Base URL: {base_url}\n\n"
         f"You are EXPLORING — performing a fluid test of this story against the live app.\n\n"
-        f"Your job: drive the browser through EVERY step in the story above. "
-        f"Count the steps — if there are 7 steps, you must perform all 7. "
-        f"Do NOT call journey_complete until every step is done. "
-        f"Re-read the story before calling journey_complete.\n\n"
+        f"This story has {step_count} steps. You MUST perform ALL {step_count} before "
+        f"calling journey_complete. Do NOT stop after login or navigation — "
+        f"continue through every interaction and verification described. "
+        f"Re-read the story before calling journey_complete to confirm you "
+        f"haven't skipped anything.\n\n"
         f"## agent-browser cheatsheet (inline — do NOT run --help)\n\n"
         f"```\n"
         f"agent-browser open <url> --json\n"
