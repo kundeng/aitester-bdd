@@ -1895,6 +1895,10 @@ class AITester:
             if emit_notes and result.notes:
                 logger.info(f"[explore] PASS — journey notes:\n{result.notes}", html=True)
             self._last_explore_notes = result.notes
+            # Stash the session ID so I ask LLM can reuse the browser
+            from aitester_bdd.authoring.tools import _SESSION_ID
+            if _SESSION_ID:
+                self._explore_session_id = _SESSION_ID
             return result.notes
         else:
             raise AssertionError(
@@ -1997,16 +2001,17 @@ class AITester:
 
         opts = _parse_options(args)
 
-        # Get current page state — try live browser first, fall back to
-        # the last explore's journey notes (which describe what was on screen).
+        # Get current page state from the live browser.
+        # Use the explore session if available, otherwise default session.
         page_context = ""
         ab_bin = shutil.which("agent-browser")
         if ab_bin:
+            cmd = [ab_bin, "snapshot", "-c", "-i"]
+            session = getattr(self, "_explore_session_id", None)
+            if session:
+                cmd = [ab_bin, "--session", session, "snapshot", "-c", "-i"]
             try:
-                proc = subprocess.run(
-                    [ab_bin, "snapshot", "-c", "-i"],
-                    capture_output=True, text=True, timeout=15,
-                )
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
                 if proc.returncode == 0 and proc.stdout.strip():
                     page_context = proc.stdout.strip()
             except Exception:
@@ -2014,7 +2019,7 @@ class AITester:
         if not page_context and hasattr(self, "_last_explore_notes") and self._last_explore_notes:
             page_context = f"(From last explore journey notes):\n{self._last_explore_notes}"
         if not page_context:
-            page_context = "(no page context available — no browser session and no prior explore)"
+            page_context = "(no page context available)"
 
         # Make the LLM call
         from aitester_bdd.llm.aiagent_adapter import AIAgentLLM
