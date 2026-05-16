@@ -555,9 +555,12 @@ class AITester:
     @keyword("Then I finalize verification")
     def finalize_verification(self) -> None:
         """Walk the rule tree against a live browser; emit Verdict (Suite Teardown)."""
-        from aitester_bdd.engine.walk import walk_verification
+        from aitester_bdd.engine.walk import walk_verification, reset_shared_browser
 
-        verdict = walk_verification(self._v)
+        # Pass already-walked rules so finalize skips them
+        walked = getattr(self, "_walked_rules", None)
+        verdict = walk_verification(self._v, skip_rules=walked)
+        reset_shared_browser()
         if verdict.failed:
             raise AssertionError(verdict.format_failure())
 
@@ -1866,23 +1869,38 @@ class AITester:
         Completion = RF PASS (with step-by-step notes in the log).
         Blocked = RF FAIL (with bug report as failure message).
 
+        If pinned rules were defined before this call, they are walked
+        first (incremental walker) so the browser is in the right state.
+        The explore agent then picks up that browser session.
+
         Optional kwargs via RF named args:
           session=<id>    reuse an existing agent-browser session
           notes=true      emit journey summary on pass (default: true)
         """
         from aitester_bdd.authoring.agent_loop import explore_with_agent
-        from pathlib import Path
 
         opts = _parse_options(args)
         session = opts.get("session")
         emit_notes = opts.get("notes", "true").lower() != "false"
 
-        # Derive base_url from the current scenario or verification
         base_url = ""
         if self._v.current_scenario is not None:
             base_url = self._v.scenarios[self._v.current_scenario].entry_url
         if not base_url:
             base_url = "http://localhost:5173"
+
+        # Walk any pending pinned rules first so the browser is in the
+        # right state. This is the M5.4 session handoff.
+        if not session and self._v.current_scenario is not None:
+            sc = self._v.scenarios[self._v.current_scenario]
+            if sc.rules:
+                from aitester_bdd.engine.walk import walk_pending_rules
+                walked_rules = getattr(self, "_walked_rules", set())
+                browser_session, newly_walked = walk_pending_rules(sc, self._v, walked_rules)
+                self._walked_rules = walked_rules | newly_walked
+                if newly_walked:
+                    logger.info(f"[explore] walked {len(newly_walked)} pinned rules before explore: {', '.join(sorted(newly_walked))}")
+                session = browser_session
 
         result = explore_with_agent(
             story=_strip_quotes(story),

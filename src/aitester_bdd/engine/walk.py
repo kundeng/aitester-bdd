@@ -1598,8 +1598,62 @@ def _build_default_registry(walk_log: Any):
     return registry
 
 
-def walk_verification(verification: "Verification") -> Verdict:
+def walk_pending_rules(scenario: "Scenario", verification: "Verification", walked_rules: set[str]) -> tuple[str, set[str]]:
+    """Walk rules not yet walked in a scenario. Returns (session_id, newly_walked).
+
+    Creates a browser if needed (or reuses the module-level one).
+    The browser stays alive so `I explore` can pick up the session.
+    This is the incremental walker for mixed pinned+fluid composability.
+    """
+    global _shared_browser
+
+    if _shared_browser is None:
+        _shared_browser = BrowserAdapter()
+        _shared_browser.new_session(headless=True)
+        if scenario.entry_url:
+            _shared_browser.open(scenario.entry_url)
+            _shared_browser.wait_for_load_state("domcontentloaded", timeout="10s")
+
+    order = _topo_sort(scenario.rules)
+    newly_walked: set[str] = set()
+    for rname in order:
+        if rname in walked_rules:
+            continue
+        rule = scenario.rules.get(rname)
+        if rule is None:
+            continue
+        result = _walk_rule(
+            _shared_browser, scenario, rule, verification,
+            already_passed=walked_rules | newly_walked,
+        )
+        if result.passed:
+            newly_walked.add(rname)
+        else:
+            log.warning("Incremental walk: rule %s failed — %s", rname, result.failure_message)
+            break
+
+    return _shared_browser._session, newly_walked
+
+
+_shared_browser: "BrowserAdapter | None" = None
+
+
+def reset_shared_browser() -> None:
+    """Clean up the shared browser at suite teardown."""
+    global _shared_browser
+    if _shared_browser is not None:
+        try:
+            _shared_browser.close()
+        except Exception:
+            pass
+        _shared_browser = None
+
+
+def walk_verification(verification: "Verification", *, skip_rules: set[str] | None = None) -> Verdict:
     """Walk all scenarios in a Verification; return a Verdict.
+
+    `skip_rules`: rule names already walked incrementally (by I explore's
+    pre-walk). These are marked as passed without re-execution.
 
     Global run timeout via AITESTER_RUN_TIMEOUT (seconds, default 300).
     Browser session is opened once and torn down at the end (assumes one
@@ -1661,9 +1715,17 @@ def walk_verification(verification: "Verification") -> Verdict:
                         pass
 
             order = _topo_sort(sc.rules)
-            already_passed: set[str] = set()
+            already_passed: set[str] = set(skip_rules or set())
             scenario_passed = True
             for rname in order:
+                if skip_rules and rname in skip_rules:
+                    verdict.results.append(
+                        RuleResult(
+                            rule_name=rname, scenario_name=sc.name, passed=True,
+                            failure_step_kind="", failure_message="(pre-walked by I explore)",
+                        )
+                    )
+                    continue
                 rule = sc.rules.get(rname)
                 if rule is None:
                     verdict.results.append(
