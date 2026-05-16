@@ -789,6 +789,67 @@ def _execute_body(
 # Per-rule walk
 # ---------------------------------------------------------------------------
 
+def _walk_explore_rule(
+    browser: BrowserAdapter,
+    scenario: "Scenario",
+    rule: "Rule",
+    verification: "Verification",
+    *,
+    start: float,
+) -> RuleResult:
+    """Walk an explore rule — hand the browser session to the agent loop."""
+    opts = rule.explore_options
+    mode = opts.get("_mode", "explore")
+    session_id = browser._session
+
+    base_url = scenario.entry_url or "http://localhost:5173"
+
+    if mode == "explore_and_author":
+        from aitester_bdd.authoring.agent_loop import author_with_agent
+        from pathlib import Path
+
+        output = opts.get("output", "")
+        pinning = opts.get("pinning", "auto")
+        suite_path = Path(output)
+
+        result = author_with_agent(
+            story=rule.explore_story,
+            base_url=base_url,
+            suite_path=suite_path,
+            bug_report_dir=suite_path.parent / "triage",
+            mode="explore_and_author",
+            pinning=pinning,
+            debug=True,
+        )
+        passed = result.suite_path is not None
+        message = f"Authored {result.suite_path}" if passed else (result.final_message or "agent exhausted iterations")
+    else:
+        from aitester_bdd.authoring.agent_loop import explore_with_agent
+
+        result = explore_with_agent(
+            story=rule.explore_story,
+            base_url=base_url,
+            session=session_id,
+            debug=True,
+        )
+        passed = result.passed
+        message = result.notes if passed else result.bug_report
+
+    emit_notes = opts.get("notes", "true").lower() != "false"
+    if passed and emit_notes and message:
+        from robot.api import logger
+        logger.info(f"[explore] PASS — {message}", html=True)
+
+    return RuleResult(
+        rule_name=rule.name,
+        scenario_name=scenario.name,
+        passed=passed,
+        failure_step_kind="" if passed else "explore_blocked",
+        failure_message="" if passed else message,
+        duration_ms=(time.time() - start) * 1000,
+    )
+
+
 def _walk_rule(
     browser: BrowserAdapter,
     scenario: "Scenario",
@@ -831,6 +892,10 @@ def _walk_rule(
                 failure_message=f"parent rule {p!r} did not pass",
                 duration_ms=(time.time() - start) * 1000,
             )
+
+    # Explore rule — dispatch to agent loop with current browser session
+    if rule.rule_type == "explore":
+        return _walk_explore_rule(browser, scenario, rule, verification, start=start)
 
     # before_rule aspect — also gives aspects a chance to skip the rule.
     if registry is not None:
@@ -1598,62 +1663,12 @@ def _build_default_registry(walk_log: Any):
     return registry
 
 
-def walk_pending_rules(scenario: "Scenario", verification: "Verification", walked_rules: set[str]) -> tuple[str, set[str]]:
-    """Walk rules not yet walked in a scenario. Returns (session_id, newly_walked).
-
-    Creates a browser if needed (or reuses the module-level one).
-    The browser stays alive so `I explore` can pick up the session.
-    This is the incremental walker for mixed pinned+fluid composability.
-    """
-    global _shared_browser
-
-    if _shared_browser is None:
-        _shared_browser = BrowserAdapter()
-        _shared_browser.new_session(headless=True)
-        if scenario.entry_url:
-            _shared_browser.open(scenario.entry_url)
-            _shared_browser.wait_for_load_state("domcontentloaded", timeout="10s")
-
-    order = _topo_sort(scenario.rules)
-    newly_walked: set[str] = set()
-    for rname in order:
-        if rname in walked_rules:
-            continue
-        rule = scenario.rules.get(rname)
-        if rule is None:
-            continue
-        result = _walk_rule(
-            _shared_browser, scenario, rule, verification,
-            already_passed=walked_rules | newly_walked,
-        )
-        if result.passed:
-            newly_walked.add(rname)
-        else:
-            log.warning("Incremental walk: rule %s failed — %s", rname, result.failure_message)
-            break
-
-    return _shared_browser._session, newly_walked
-
-
-_shared_browser: "BrowserAdapter | None" = None
-
-
-def reset_shared_browser() -> None:
-    """Clean up the shared browser at suite teardown."""
-    global _shared_browser
-    if _shared_browser is not None:
-        try:
-            _shared_browser.close()
-        except Exception:
-            pass
-        _shared_browser = None
-
-
-def walk_verification(verification: "Verification", *, skip_rules: set[str] | None = None) -> Verdict:
+def walk_verification(verification: "Verification") -> Verdict:
     """Walk all scenarios in a Verification; return a Verdict.
 
-    `skip_rules`: rule names already walked incrementally (by I explore's
-    pre-walk). These are marked as passed without re-execution.
+    Explore rule nodes are handled inline — when the walker reaches an
+    explore node in topo order, it hands its browser session to the agent
+    loop via _walk_explore_rule. One browser, one session, one interpreter.
 
     Global run timeout via AITESTER_RUN_TIMEOUT (seconds, default 300).
     Browser session is opened once and torn down at the end (assumes one
@@ -1715,17 +1730,9 @@ def walk_verification(verification: "Verification", *, skip_rules: set[str] | No
                         pass
 
             order = _topo_sort(sc.rules)
-            already_passed: set[str] = set(skip_rules or set())
+            already_passed: set[str] = set()
             scenario_passed = True
             for rname in order:
-                if skip_rules and rname in skip_rules:
-                    verdict.results.append(
-                        RuleResult(
-                            rule_name=rname, scenario_name=sc.name, passed=True,
-                            failure_step_kind="", failure_message="(pre-walked by I explore)",
-                        )
-                    )
-                    continue
                 rule = sc.rules.get(rname)
                 if rule is None:
                     verdict.results.append(

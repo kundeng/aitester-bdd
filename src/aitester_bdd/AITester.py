@@ -264,6 +264,25 @@ class HookDef:
 
 
 @dataclass
+class ExecutionContext:
+    """Runtime state passed to every rule during walking.
+
+    Separates the WHAT (Rule node) from the HOW (execution environment).
+    The walker creates one context per scenario and passes it to each rule.
+    """
+
+    session_id: str = ""
+    scope: str = ""
+    walked_rules: set = field(default_factory=set)
+    deadline: Optional[float] = None
+    # Browser and aspects are set by the walker at walk time, not at plan time.
+    # Typed as Any here to avoid circular imports with engine modules.
+    browser: Any = None
+    walk_log: Any = None
+    aspects: Any = None
+
+
+@dataclass
 class Rule:
     """A named block of guards, actions, observations/assertions.
 
@@ -291,6 +310,9 @@ class Rule:
     """
 
     name: str
+    rule_type: str = "pinned"  # "pinned" (CSS actions) or "explore" (agent-driven fluid test)
+    explore_story: str = ""    # story text for explore rules
+    explore_options: dict[str, str] = field(default_factory=dict)  # notes, pinning, output for explore
     parents: list[str] = field(default_factory=list)
     items: list[Any] = field(default_factory=list)  # StateCheck | Action | Emit in declaration order
     retry_max: int = 0
@@ -554,13 +576,15 @@ class AITester:
 
     @keyword("Then I finalize verification")
     def finalize_verification(self) -> None:
-        """Walk the rule tree against a live browser; emit Verdict (Suite Teardown)."""
-        from aitester_bdd.engine.walk import walk_verification, reset_shared_browser
+        """Walk the rule tree against a live browser; emit Verdict (Suite Teardown).
 
-        # Pass already-walked rules so finalize skips them
-        walked = getattr(self, "_walked_rules", None)
-        verdict = walk_verification(self._v, skip_rules=walked)
-        reset_shared_browser()
+        Explore rule nodes are handled inline by the walker — when it
+        reaches one in topo order, it hands the browser session to the
+        agent loop. One browser, one session, one interpreter.
+        """
+        from aitester_bdd.engine.walk import walk_verification
+
+        verdict = walk_verification(self._v)
         if verdict.failed:
             raise AssertionError(verdict.format_failure())
 
@@ -1863,125 +1887,78 @@ class AITester:
     # ------------------------------------------------------------------
 
     @keyword("I explore")
-    def i_explore(self, story: str, *args: str) -> str:
-        """Fluid test — agent drives the browser through the story.
+    def i_explore(self, story: str, *args: str) -> None:
+        """Add an explore rule node to the plan.
 
-        Completion = RF PASS (with step-by-step notes in the log).
-        Blocked = RF FAIL (with bug report as failure message).
+        The walker executes this as a fluid test — agent drives the browser
+        through the story using the execution context's browser session.
 
-        If pinned rules were defined before this call, they are walked
-        first (incremental walker) so the browser is in the right state.
-        The explore agent then picks up that browser session.
+        Explore nodes participate in topo sort via parents, just like
+        pinned rules. The walker handles them in order.
 
         Optional kwargs via RF named args:
-          session=<id>    reuse an existing agent-browser session
+          session=<id>    override session (rarely needed)
           notes=true      emit journey summary on pass (default: true)
         """
-        from aitester_bdd.authoring.agent_loop import explore_with_agent
-
         opts = _parse_options(args)
-        session = opts.get("session")
-        emit_notes = opts.get("notes", "true").lower() != "false"
+        if self._v.current_scenario is None:
+            raise RuntimeError("no current scenario; missing [Setup] Given I start scenario")
+        sc = self._v.scenarios[self._v.current_scenario]
 
-        base_url = ""
-        if self._v.current_scenario is not None:
-            base_url = self._v.scenarios[self._v.current_scenario].entry_url
-        if not base_url:
-            base_url = "http://localhost:5173"
+        # Auto-name: explore_0, explore_1, ...
+        explore_idx = sum(1 for r in sc.rules.values() if r.rule_type == "explore")
+        rule_name = f"explore_{explore_idx}"
 
-        # Walk any pending pinned rules first so the browser is in the
-        # right state. This is the M5.4 session handoff.
-        if not session and self._v.current_scenario is not None:
-            sc = self._v.scenarios[self._v.current_scenario]
-            if sc.rules:
-                from aitester_bdd.engine.walk import walk_pending_rules
-                walked_rules = getattr(self, "_walked_rules", set())
-                browser_session, newly_walked = walk_pending_rules(sc, self._v, walked_rules)
-                self._walked_rules = walked_rules | newly_walked
-                if newly_walked:
-                    logger.info(f"[explore] walked {len(newly_walked)} pinned rules before explore: {', '.join(sorted(newly_walked))}")
-                session = browser_session
+        # Parent is the most recently defined rule (if any)
+        last_rule = sc.current_rule
+        parents = [last_rule] if last_rule else []
 
-        result = explore_with_agent(
-            story=_strip_quotes(story),
-            base_url=base_url,
-            session=session,
-            debug=True,
+        rule = Rule(
+            name=rule_name,
+            rule_type="explore",
+            explore_story=_strip_quotes(story),
+            explore_options=opts,
+            parents=parents,
         )
-
-        if result.passed:
-            if emit_notes and result.notes:
-                logger.info(f"[explore] PASS — journey notes:\n{result.notes}", html=True)
-            self._last_explore_notes = result.notes
-            # Stash the session ID so I ask LLM can reuse the browser
-            from aitester_bdd.authoring.tools import _SESSION_ID
-            if _SESSION_ID:
-                self._explore_session_id = _SESSION_ID
-            return result.notes
-        else:
-            raise AssertionError(
-                f"[explore] FAIL — journey blocked:\n{result.bug_report}"
-            )
+        sc.rules[rule_name] = rule
+        sc.current_rule = rule_name
 
     @keyword("I explore and author")
-    def i_explore_and_author(self, story: str, *args: str) -> str:
-        """Fluid test + writes a .robot suite.
+    def i_explore_and_author(self, story: str, *args: str) -> None:
+        """Add an explore+author rule node to the plan.
 
-        Same as 'I explore' but also produces a pinned/mixed .robot file.
+        Same as 'I explore' but the walker also writes a .robot file
+        after the agent completes the journey.
 
         Required kwargs:
           output=<path>     where to write the authored suite
         Optional kwargs:
           pinning=auto      aggressive | conservative | none | auto (default)
-          session=<id>      reuse an existing agent-browser session
           notes=true        emit journey summary on pass (default: true)
         """
-        from aitester_bdd.authoring.agent_loop import author_with_agent
-        from pathlib import Path
-
         opts = _parse_options(args)
         output = opts.get("output")
         if not output:
             raise ValueError("I explore and author requires output=<path>")
-        pinning = opts.get("pinning", "auto")
-        session = opts.get("session")
-        emit_notes = opts.get("notes", "true").lower() != "false"
+        if self._v.current_scenario is None:
+            raise RuntimeError("no current scenario")
+        sc = self._v.scenarios[self._v.current_scenario]
 
-        base_url = ""
-        if self._v.current_scenario is not None:
-            base_url = self._v.scenarios[self._v.current_scenario].entry_url
-        if not base_url:
-            base_url = "http://localhost:5173"
+        explore_idx = sum(1 for r in sc.rules.values() if r.rule_type == "explore")
+        rule_name = f"explore_author_{explore_idx}"
+        last_rule = sc.current_rule
+        parents = [last_rule] if last_rule else []
 
-        full_story = _strip_quotes(story)
-
-        suite_path = Path(output)
-        triage_dir = suite_path.parent / "triage"
-
-        result = author_with_agent(
-            story=full_story,
-            base_url=base_url,
-            suite_path=suite_path,
-            bug_report_dir=triage_dir,
-            mode="explore_and_author",
-            pinning=pinning,
-            debug=True,
+        opts["_mode"] = "explore_and_author"
+        rule = Rule(
+            name=rule_name,
+            rule_type="explore",
+            explore_story=_strip_quotes(story),
+            explore_options=opts,
+            parents=parents,
         )
-
-        if result.suite_path:
-            msg = f"Authored suite written to {result.suite_path}"
-            if emit_notes:
-                logger.info(f"[explore+author] PASS — {msg}", html=True)
-            return msg
-        elif result.bug_report_path:
-            raise AssertionError(
-                f"[explore+author] FAIL — journey blocked. Bug report: {result.bug_report_path}"
-            )
-        else:
-            raise AssertionError(
-                f"[explore+author] FAIL — agent exhausted iterations without completing. "
-                f"Last message: {result.final_message[:500]}"
-            )
+        sc.rules[rule_name] = rule
+        sc.current_rule = rule_name
 
     # ------------------------------------------------------------------
     # Unified LLM invoke (spec 36 M2)
