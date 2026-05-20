@@ -42,15 +42,17 @@ After a run, you'll find in the output directory:
 ## Choosing a backend
 
 ```bash
-# Default: agent-browser (zero-install, same driver as authoring)
+# Default: playwright (consistent with explore, reliable get_text, native waits)
 aitester run suite.robot
 
-# Playwright (faster for action-heavy suites)
-AITESTER_BROWSER=playwright aitester run suite.robot
+# Agent-browser (zero-install, same driver as authoring)
+AITESTER_BROWSER=agent-browser aitester run suite.robot
 
 # Nodriver (bot-detection-resistant)
 AITESTER_BROWSER=nodriver aitester run suite.robot
 ```
+
+First run with playwright requires `aitester init-browser` (or `rfbrowser init`) to download browser binaries. The Browser library is auto-imported — suites don't need `Library Browser`.
 
 Or declare in the suite itself:
 ```robot
@@ -134,7 +136,7 @@ Skips the LLM call on failure — useful when iterating quickly on a known issue
 |-------|---------|---------|
 | Global run | 300s | `AITESTER_RUN_TIMEOUT=600` |
 | Observation (after action) | 30s | `set rule timeout 60000` |
-| Guard (before action) | 200ms | `set rule timeout 5000` (guards inherit) |
+| Guard (before action) | 10s | `set rule timeout 15000` (guards inherit) |
 
 ## Running with Robot Framework directly
 

@@ -67,15 +67,19 @@ Output sidecar files at `<output_dir>/`:
 
 | Backend | Default? | Setup | Best for |
 |---------|----------|-------|----------|
-| `agent-browser` | ✓ | none — CLI ships its own browser | most cases; same driver author + run, zero install friction |
-| `playwright` | | `aitester init-browser` once | action-heavy tests where subprocess latency matters |
+| `playwright` | ✓ | `aitester init-browser` once | consistent engine for pinned + fluid tests, reliable `get_text`, native Playwright waits |
+| `agent-browser` | | `npm i -g agent-browser` | zero install friction, same CLI as authoring phase |
 | `nodriver` | | `pip install aitester-bdd[stealth]` + Edge/Chrome | bot-detected sites (DataDome / Cloudflare BM / etc.) |
 
-Same `.robot` runs on any of the three.
+Same `.robot` runs on any of the three. The Browser library is auto-imported when the `playwright` backend is selected — suites don't need `Library Browser` in their Settings.
+
+### Mixed suites: pinned + fluid on one browser
+
+When the `playwright` backend is active, `I explore` rules share the **same RF Browser session** as pinned rules. The explore agent gets typed Python tools (`browser_click`, `browser_get_text`, `browser_snapshot`, etc.) that call the live Playwright instance — no subprocess, no session handoff. A pinned login rule can run first, then `I explore` picks up the authenticated session.
 
 ## Architecture (one paragraph)
 
-The LLM is the author, not the runtime. At authoring time, a DeepAgents/LangGraph agent reads `SKILL.md` as its system prompt, drives the live target by shelling out to the `agent-browser` CLI (via DeepAgents' `LocalShellBackend.execute` tool), and emits a `.robot` file with selectors grounded in real snapshots — or writes a bug report when the system is broken in a way that prevents authoring. The agent batches multiple `agent-browser` subcommands per shell call (`open && snapshot && get count …`) so each LLM round-trip drives multiple browser ops. At run time, plain Robot Framework executes the suite via one of three pluggable browser backends; no LLM in the loop. Failures fire an AOP `diagnose` aspect that hands the LLM the MDP trajectory plus snapshot and asks "why?" — short natural-language diagnoses land on `RuleResult.ai_diagnosis` and `failures.jsonl`. The walker, gotcha-fixes, and AspectRegistry are ported from the WISE RPA BDD skill.
+The LLM is the author, not the runtime. At authoring time, a DeepAgents/LangGraph agent reads `SKILL.md` as its system prompt, drives the live target by shelling out to the `agent-browser` CLI (via DeepAgents' `LocalShellBackend.execute` tool), and emits a `.robot` file with selectors grounded in real snapshots — or writes a bug report when the system is broken in a way that prevents authoring. At run time, plain Robot Framework executes the suite via the Playwright backend (default); the walker and `I explore` agent share the same RF Browser instance. Pinned rules (deterministic, no LLM) and fluid explore rules (LLM-driven) operate on the same page, same cookies, same DOM. Failures fire an AOP `diagnose` aspect that hands the LLM the MDP trajectory plus snapshot and asks "why?" — short natural-language diagnoses land on `RuleResult.ai_diagnosis` and `failures.jsonl`. The walker, gotcha-fixes, and AspectRegistry are ported from the WISE RPA BDD skill.
 
 ## License
 

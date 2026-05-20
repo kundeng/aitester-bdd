@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-20
+
+### Changed
+
+- **Default runtime backend: `playwright`** (was `agent-browser`). Consistent engine for pinned and fluid tests. Reliable `get_text`, native Playwright waits, in-process speed. Requires `aitester init-browser` on first run.
+- **Guard timeout: 10s** (was 200ms). Matches upstream WISE RPA BDD's `wait_for_elements_state("attached", "10s")`. Guards now wait for SPA hydration.
+- **Text observations poll** — `has_text`, `contains`, `matches`, `not_contains` now poll until match or timeout (was single read). Catches post-navigation text changes.
+
+### Added
+
+- **Playwright explore tools** — when running inside RF, `I explore` uses typed Python tools (`browser_click`, `browser_get_text`, `browser_snapshot`, etc.) that call the same RF Browser instance the walker uses. No subprocess, no session handoff. Mixed suites (pinned login → fluid explore) share one browser session.
+- **Auto-import Browser library** — suites don't need `Library Browser` when using the `playwright` backend. The walker auto-imports it via `BuiltIn().import_library("Browser")`.
+- **JS-level wait fallback** — `wait_for_elements_state` falls back to in-page JS polling for SPA apps where hash routing creates elements after initial page load.
+- **`fill_secret` / `type_secret` handling** — RF Browser API compatibility for secret password inputs.
+
+### Fixed
+
+- `has_text` observation after navigation returned stale text from the previous view (single read, no poll).
+- Guard timeout too short (200ms) for SPA route transitions — elements appeared after guards timed out.
+- `type secret` keyword failed on Playwright backend (`fill_text` doesn't accept `secret` kwarg).
+
 ## [0.2.0] - 2026-05-16
 
 ### Added

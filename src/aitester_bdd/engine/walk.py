@@ -185,11 +185,23 @@ def _eval_state_check(
         obs = browser.get_count(css_resolved)
         return (obs == int(expected), f"count == {expected}", str(obs))
     if kind == "count_at_least":
+        threshold = int(expected)
         obs = browser.get_count(css_resolved)
-        return (obs >= int(expected), f"count >= {expected}", str(obs))
+        if obs < threshold and timeout_ms >= 500:
+            end = time.time() + timeout_ms / 1000
+            while time.time() < end and obs < threshold:
+                time.sleep(0.15)
+                obs = browser.get_count(css_resolved)
+        return (obs >= threshold, f"count >= {expected}", str(obs))
     if kind == "count_at_most":
+        threshold = int(expected)
         obs = browser.get_count(css_resolved)
-        return (obs <= int(expected), f"count <= {expected}", str(obs))
+        if obs > threshold and timeout_ms >= 500:
+            end = time.time() + timeout_ms / 1000
+            while time.time() < end and obs > threshold:
+                time.sleep(0.15)
+                obs = browser.get_count(css_resolved)
+        return (obs <= threshold, f"count <= {expected}", str(obs))
 
     # ── Element text (poll until match or timeout, like URL checks) ────
     if kind == "has_text":

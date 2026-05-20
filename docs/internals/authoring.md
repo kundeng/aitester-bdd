@@ -100,12 +100,17 @@ The `I explore` keyword creates a rule that's walked by the agent at run time:
 When I explore "Navigate to settings, toggle dark mode, verify the theme changes"
 ```
 
-Unlike authored rules (which are deterministic), explore rules invoke the agent loop at execution time. They participate in topo-sort like pinned rules — the walker hands its browser session to the agent when it reaches an explore node in order.
+Unlike authored rules (which are deterministic), explore rules invoke the agent loop at execution time. They participate in topo-sort like pinned rules.
+
+With the Playwright backend (default), the explore agent uses **typed Python tools** (`browser_click`, `browser_get_text`, `browser_snapshot`, etc.) that call the same RF Browser instance the walker uses. No subprocess, no session handoff — the agent operates on the same page, cookies, and DOM state as the pinned rules before it. Mixed suites (pinned login → fluid explore) work seamlessly.
+
+With the agent-browser backend, the explore agent falls back to shelling out to the `agent-browser` CLI with a shared session ID.
 
 Use cases:
 
 - Resilient tests that survive UI refactors (the agent adapts to the current DOM)
 - Exploratory testing in CI
+- Mixed suites: pinned rules for fast deterministic setup, fluid explore for resilient verification
 - One-off verification that doesn't need a committed suite
 
 Trade-off: ~$1-3 per explore rule execution (LLM tokens).
