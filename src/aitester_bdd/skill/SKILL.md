@@ -950,6 +950,7 @@ You agreed to all of these by invoking this skill:
 | `When I click the approve button` | `When I click locator "[data-testid=case-approve]"` |
 | Guess a selector that "probably exists" | Snapshot again, or write a bug report |
 | Ship a suite that dryrun-fails | `robot --dryrun` clean is required before handoff |
+| `But url contains "login"` (wrong negation) | `But url does not contain "login"` |
 
 ---
 
@@ -980,6 +981,8 @@ Avoid collapsing the flow into one opaque keyword. If a keyword doesn't exist fo
 | Submit form | Toast or redirect | `[role=alert]` or URL change |
 | Click action → backend write | State badge updates after API roundtrip | `.decision-badge[data-state=approved]` |
 | Page load → SSE stream | Content streams in | `[data-streaming=done]` or count of items |
+
+Record each as a pair: triggering action + completion selector. These become observation gates in the draft.
 
 Record each as a pair: triggering action + completion selector. These become observation gates in the draft.
 

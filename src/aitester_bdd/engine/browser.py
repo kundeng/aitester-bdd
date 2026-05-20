@@ -91,7 +91,7 @@ def BrowserAdapter():
     """
     import os
 
-    choice = os.environ.get("AITESTER_BROWSER", "agent-browser").strip().lower()
+    choice = os.environ.get("AITESTER_BROWSER", "playwright").strip().lower()
     if choice == "nodriver":
         from aitester_bdd.engine.nodriver_backend import NodriverBackend
         return NodriverBackend()
@@ -119,8 +119,8 @@ class _PlaywrightBackend:
         """Lazy-acquire RF-Browser instance.
 
         When running inside RF: returns the live `Browser` library
-        instance from RF's keyword store (so all our calls operate on the
-        same page the user's `.robot` file is driving).
+        instance from RF's keyword store. If the suite didn't declare
+        `Library Browser`, auto-imports it so suites are backend-agnostic.
 
         When RF context not available: instantiates a fresh Browser()
         (CLI / standalone runner path).
@@ -129,13 +129,17 @@ class _PlaywrightBackend:
         """
         if self._rfb is None:
             try:
-                # Path A: inside RF — grab the live instance.
                 from robot.libraries.BuiltIn import BuiltIn
+                bi = BuiltIn()
                 try:
-                    self._rfb = BuiltIn().get_library_instance("Browser")
+                    self._rfb = bi.get_library_instance("Browser")
                 except Exception:
-                    self._rfb = None
-                # Path B: not in RF context — fresh instance.
+                    # Browser library not loaded — auto-import it
+                    try:
+                        bi.import_library("Browser")
+                        self._rfb = bi.get_library_instance("Browser")
+                    except Exception:
+                        self._rfb = None
                 if self._rfb is None:
                     from Browser import Browser  # type: ignore[import-not-found]
                     self._rfb = Browser()
@@ -156,11 +160,20 @@ class _PlaywrightBackend:
         b = self._rf_browser()
         try:
             b.new_browser(headless=headless)
+        except Exception as exc:
+            log.warning("new_browser failed: %s", exc)
+            return
+        try:
             b.new_context()
+        except Exception as exc:
+            log.warning("new_context failed: %s", exc)
+            return
+        try:
             b.new_page()
         except Exception as exc:
-            # Likely: RF already opened a browser for us. That's fine.
-            log.debug("new_session no-op (%s)", exc)
+            log.warning("new_page failed: %s", exc)
+            return
+        log.warning("Playwright new_session: OK (headless=%s)", headless)
 
     def close(self) -> None:
         try:
@@ -210,19 +223,45 @@ class _PlaywrightBackend:
     def wait_for_elements_state(
         self, selector: str, state: str = "attached", *, timeout_ms: int = 5000
     ) -> bool:
+        """Wait for element state. Uses Playwright native wait first, then
+        falls back to JS-level polling for SPA apps where hash routing
+        may create elements after the initial page load completes."""
         b = self._rf_browser()
+        want_present = state in ("attached", "visible")
+        # Try Playwright native wait first (fast for static pages)
         if hasattr(b, "wait_for_elements_state"):
             try:
                 b.wait_for_elements_state(selector, state, f"{timeout_ms}ms")
                 return True
             except Exception:
-                return False
-        # Fallback for NullBrowser/missing API: poll
+                pass
+        # Fallback: JS-level polling inside the page context.
+        # Catches elements that appear after SPA hydration / hash routing.
+        if want_present:
+            try:
+                import json as _json
+                escaped = _json.dumps(selector)
+                js = (
+                    f"() => new Promise(resolve => {{"
+                    f"  const deadline = Date.now() + {timeout_ms};"
+                    f"  const poll = () => {{"
+                    f"    if (document.querySelector({escaped})) resolve(true);"
+                    f"    else if (Date.now() > deadline) resolve(false);"
+                    f"    else setTimeout(poll, 100);"
+                    f"  }};"
+                    f"  poll();"
+                    f"}})"
+                )
+                result = b.evaluate_javascript(None, js)
+                if result:
+                    return True
+            except Exception:
+                pass
+        # Final fallback: Python-level polling
         end = time.time() + (timeout_ms / 1000.0)
         while time.time() < end:
             try:
                 count = self.get_count(selector)
-                want_present = state in ("attached", "visible")
                 if want_present and count > 0:
                     return True
                 if (not want_present) and count == 0:
@@ -287,8 +326,14 @@ class _PlaywrightBackend:
 
     def type(self, selector: str, value: str, *, secret: bool = False) -> None:
         b = self._rf_browser()
+        if secret and hasattr(b, "type_secret"):
+            try:
+                b.type_secret(selector, value)
+                return
+            except Exception:
+                pass
         if hasattr(b, "fill_text"):
-            b.fill_text(selector, value, secret=secret)
+            b.fill_text(selector, value)
         elif hasattr(b, "type_text"):
             b.type_text(selector, value)
         else:

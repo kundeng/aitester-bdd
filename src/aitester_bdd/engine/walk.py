@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("aitester_bdd.engine.walk")
 
 DEFAULT_OBSERVATION_TIMEOUT_MS = 30000  # WISE parity: Playwright's default 30s
-DEFAULT_GUARD_TIMEOUT_MS = 200          # guards stay fast — they're checking pre-state, not waiting
+DEFAULT_GUARD_TIMEOUT_MS = 10000        # WISE parity: wait_for_elements_state("attached", "10s")
 DEFAULT_RUN_TIMEOUT_S = 300  # global cap — override via AITESTER_RUN_TIMEOUT env
 
 
@@ -191,19 +191,47 @@ def _eval_state_check(
         obs = browser.get_count(css_resolved)
         return (obs <= int(expected), f"count <= {expected}", str(obs))
 
-    # ── Element text ──────────────────────────────────────────────────
+    # ── Element text (poll until match or timeout, like URL checks) ────
     if kind == "has_text":
         obs = browser.get_text(css_resolved).strip()
-        return (obs == expected, expected, obs)
+        ok = obs == expected
+        if not ok and timeout_ms >= 500:
+            end = time.time() + timeout_ms / 1000
+            while time.time() < end and not ok:
+                time.sleep(0.15)
+                obs = browser.get_text(css_resolved).strip()
+                ok = obs == expected
+        return (ok, expected, obs)
     if kind == "contains":
         obs = browser.get_text(css_resolved)
-        return (expected in obs, f"contains {expected!r}", obs)
+        ok = expected in obs
+        if not ok and timeout_ms >= 500:
+            end = time.time() + timeout_ms / 1000
+            while time.time() < end and not ok:
+                time.sleep(0.15)
+                obs = browser.get_text(css_resolved)
+                ok = expected in obs
+        return (ok, f"contains {expected!r}", obs)
     if kind == "matches":
         obs = browser.get_text(css_resolved)
-        return (bool(re.search(expected, obs)), f"matches {expected!r}", obs)
+        ok = bool(re.search(expected, obs))
+        if not ok and timeout_ms >= 500:
+            end = time.time() + timeout_ms / 1000
+            while time.time() < end and not ok:
+                time.sleep(0.15)
+                obs = browser.get_text(css_resolved)
+                ok = bool(re.search(expected, obs))
+        return (ok, f"matches {expected!r}", obs)
     if kind == "not_contains":
         obs = browser.get_text(css_resolved)
-        return (expected not in obs, f"not contains {expected!r}", obs)
+        ok = expected not in obs
+        if not ok and timeout_ms >= 500:
+            end = time.time() + timeout_ms / 1000
+            while time.time() < end and not ok:
+                time.sleep(0.15)
+                obs = browser.get_text(css_resolved)
+                ok = expected not in obs
+        return (ok, f"not contains {expected!r}", obs)
 
     # ── Element state ──────────────────────────────────────────────────
     if kind == "visible":
@@ -820,10 +848,16 @@ def _walk_explore_rule(
     *,
     start: float,
 ) -> RuleResult:
-    """Walk an explore rule — hand the browser session to the agent loop."""
+    """Walk an explore rule — hand the browser to the agent loop.
+
+    When using Playwright backend (inside RF), the explore agent gets
+    typed Python tools that share the same RF Browser instance. No
+    session handoff needed. When using agent-browser backend, falls
+    back to session ID handoff.
+    """
     opts = rule.explore_options
     mode = opts.get("_mode", "explore")
-    session_id = browser._session
+    session_id = getattr(browser, "_session", None)
 
     base_url = scenario.entry_url or "http://localhost:5173"
 

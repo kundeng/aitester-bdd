@@ -396,6 +396,16 @@ def _author_once(
 # ─── Explore (fluid test) ────────────────────────────────────────────
 
 
+def _is_inside_rf() -> bool:
+    """Check if we're running inside Robot Framework."""
+    try:
+        from robot.libraries.BuiltIn import BuiltIn
+        BuiltIn().get_library_instance("Browser")
+        return True
+    except Exception:
+        return False
+
+
 def explore_with_agent(
     *,
     story: str,
@@ -407,87 +417,117 @@ def explore_with_agent(
 ) -> ExploreResult:
     """Run the agent loop in explore mode — fluid test, no suite output.
 
-    The agent drives the browser through the story.  Completion = PASS
-    (with notes), blocked = FAIL (with bug report).
+    When running inside RF (aitester run): uses Playwright-backed tools
+    that share the walker's RF Browser instance. Same page, same cookies,
+    same DOM state. No subprocess, no session handoff.
 
-    If `session` is provided, the agent reuses that agent-browser session.
-    Otherwise a fresh session is created.
+    When running standalone (no RF context): falls back to agent-browser
+    CLI via LocalShellBackend.
     """
     from deepagents import create_deep_agent
-    from deepagents.backends import LocalShellBackend
     from langgraph.checkpoint.memory import InMemorySaver
 
     from aitester_bdd.authoring.tools import (
         _reset_explore_state,
         build_explore_tools,
         get_explore_result,
-        session_id,
     )
 
     _reset_explore_state()
-
     llm = _build_llm()
-    tools = build_explore_tools()
-    system_prompt = _EXPLORE_SYSTEM_PROMPT
 
-    browser_session = session or session_id()
+    # Terminal tools (journey_complete, journey_blocked) — always needed
+    terminal_tools = build_explore_tools()
 
-    backend_env = dict(os.environ)
-    backend_env["AGENT_BROWSER_SESSION"] = browser_session
+    if _is_inside_rf():
+        # Playwright path: typed tools wrapping the shared RF Browser
+        from aitester_bdd.authoring.playwright_tools import (
+            build_playwright_browser_tools,
+            PLAYWRIGHT_EXPLORE_PROMPT,
+        )
+        browser_tools = build_playwright_browser_tools()
+        tools = terminal_tools + browser_tools
+        system_prompt = PLAYWRIGHT_EXPLORE_PROMPT
+        backend = None
+    else:
+        # Fallback: agent-browser CLI via shell (standalone / aitester author)
+        from deepagents.backends import LocalShellBackend
+        from aitester_bdd.authoring.tools import session_id
 
-    backend = LocalShellBackend(
-        root_dir=str(source_root) if source_root else None,
-        env=backend_env,
-        inherit_env=True,
-        timeout=120,
-        max_output_bytes=200_000,
-    )
+        tools = terminal_tools
+        system_prompt = _EXPLORE_SYSTEM_PROMPT
+        browser_session = session or session_id()
+        backend_env = dict(os.environ)
+        backend_env["AGENT_BROWSER_SESSION"] = browser_session
+        backend = LocalShellBackend(
+            root_dir=str(source_root) if source_root else None,
+            env=backend_env,
+            inherit_env=True,
+            timeout=120,
+            max_output_bytes=200_000,
+        )
 
-    agent = create_deep_agent(
-        model=llm,
-        tools=tools,
-        system_prompt=system_prompt,
-        backend=backend,
-        checkpointer=InMemorySaver(),
-    )
+    agent_kwargs = {
+        "model": llm,
+        "tools": tools,
+        "system_prompt": system_prompt,
+        "checkpointer": InMemorySaver(),
+    }
+    if backend is not None:
+        agent_kwargs["backend"] = backend
 
-    # Count numbered steps (1), 2), etc.) or sentences ending with periods
+    agent = create_deep_agent(**agent_kwargs)
+
     import re
     numbered = re.findall(r'\d+\)', story)
     step_count = len(numbered) if numbered else len([s for s in story.split('.') if s.strip()])
 
-    user_message = (
-        f"Story ({step_count} steps): {story}\n\n"
-        f"Base URL: {base_url}\n\n"
-        f"You are EXPLORING — performing a fluid test of this story against the live app.\n\n"
-        f"This story has {step_count} steps. You MUST perform ALL {step_count} before "
-        f"calling journey_complete. Do NOT stop after login or navigation — "
-        f"continue through every interaction and verification described. "
-        f"Re-read the story before calling journey_complete to confirm you "
-        f"haven't skipped anything.\n\n"
-        f"## agent-browser cheatsheet (inline — do NOT run --help)\n\n"
-        f"```\n"
-        f"agent-browser open <url> --json\n"
-        f"agent-browser snapshot -c -i --json\n"
-        f"agent-browser get count '<css>' --json\n"
-        f"agent-browser get text '<css>' --json\n"
-        f"agent-browser click '<css|@ref>' --json\n"
-        f"agent-browser fill '<css>' '<text>' --json\n"
-        f"agent-browser type '<css>' '<text>' --json\n"
-        f"agent-browser press '<key>' --json\n"
-        f"agent-browser wait '<css>'|<ms> --json\n"
-        f"agent-browser eval '<js>' --json\n"
-        f"agent-browser find <locator> <value> <action> [text] --json\n"
-        f"```\n\n"
-        f"Chain commands with `&&` in one execute call.\n\n"
-        f"## Rules\n\n"
-        f"  - Complete the journey end-to-end. Do not stop early.\n"
-        f"  - If the system is broken (page won't render, element missing, "
-        f"action fails after retries), call journey_blocked.\n"
-        f"  - If you complete the full journey successfully, call journey_complete "
-        f"with a step-by-step summary of what you did and observed.\n\n"
-        f"Begin."
-    )
+    if _is_inside_rf():
+        user_message = (
+            f"Story ({step_count} steps): {story}\n\n"
+            f"Base URL: {base_url}\n\n"
+            f"You are EXPLORING — performing a fluid test of this story against the live app.\n\n"
+            f"This story has {step_count} steps. You MUST perform ALL {step_count} before "
+            f"calling journey_complete. Do NOT stop after login or navigation — "
+            f"continue through every interaction and verification described. "
+            f"Re-read the story before calling journey_complete to confirm you "
+            f"haven't skipped anything.\n\n"
+            f"Start with browser_snapshot() to see the current page state, then proceed.\n\n"
+            f"Begin."
+        )
+    else:
+        user_message = (
+            f"Story ({step_count} steps): {story}\n\n"
+            f"Base URL: {base_url}\n\n"
+            f"You are EXPLORING — performing a fluid test of this story against the live app.\n\n"
+            f"This story has {step_count} steps. You MUST perform ALL {step_count} before "
+            f"calling journey_complete. Do NOT stop after login or navigation — "
+            f"continue through every interaction and verification described. "
+            f"Re-read the story before calling journey_complete to confirm you "
+            f"haven't skipped anything.\n\n"
+            f"## agent-browser cheatsheet (inline — do NOT run --help)\n\n"
+            f"```\n"
+            f"agent-browser open <url> --json\n"
+            f"agent-browser snapshot -c -i --json\n"
+            f"agent-browser get count '<css>' --json\n"
+            f"agent-browser get text '<css>' --json\n"
+            f"agent-browser click '<css|@ref>' --json\n"
+            f"agent-browser fill '<css>' '<text>' --json\n"
+            f"agent-browser type '<css>' '<text>' --json\n"
+            f"agent-browser press '<key>' --json\n"
+            f"agent-browser wait '<css>'|<ms> --json\n"
+            f"agent-browser eval '<js>' --json\n"
+            f"agent-browser find <locator> <value> <action> [text] --json\n"
+            f"```\n\n"
+            f"Chain commands with `&&` in one execute call.\n\n"
+            f"## Rules\n\n"
+            f"  - Complete the journey end-to-end. Do not stop early.\n"
+            f"  - If the system is broken (page won't render, element missing, "
+            f"action fails after retries), call journey_blocked.\n"
+            f"  - If you complete the full journey successfully, call journey_complete "
+            f"with a step-by-step summary of what you did and observed.\n\n"
+            f"Begin."
+        )
 
     slug = _slugify(story)[:60] or "explore"
     thread_id = f"explore-{slug}"
