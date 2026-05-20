@@ -285,12 +285,14 @@ def _author_once(
     tools = build_tools(source_root=source_root)
     system_prompt = build_system_prompt(mode, pinning=pinning)
 
-    # LocalShellBackend gives the agent an `execute` tool for shell
-    # commands (mirrors wise-rpa-bdd). The agent calls `agent-browser
-    # <subcommand> --json` directly; session is pinned via env so all
-    # invocations share the same persistent browser session for this
-    # authoring run.
-    backend_env = dict(os.environ)  # inherit PATH etc.
+    # When inside RF with Playwright, add Playwright browser tools so the
+    # authoring agent uses the same browser session as the walker. The
+    # LocalShellBackend still provides `execute` for file ops (read, glob).
+    if _is_inside_rf():
+        from aitester_bdd.authoring.playwright_tools import build_playwright_browser_tools
+        tools = tools + build_playwright_browser_tools()
+
+    backend_env = dict(os.environ)
     backend_env["AGENT_BROWSER_SESSION"] = session_id()
 
     backend = LocalShellBackend(

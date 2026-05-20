@@ -92,40 +92,48 @@ def _open(url: str) -> str:
 
 
 def _snapshot() -> str:
-    """Compact page snapshot: URL + interactive element refs."""
+    """Compact page snapshot mimicking agent-browser's token-efficient format.
+
+    Returns: URL, title, and a compact list of interactive elements with
+    short descriptors. Each element is one line: `@eN tag "text" [attrs]`.
+    """
     b = _get_backend()
     url = b.url()
-    # Get page title and key structure
     rfb = b._rf_browser()
     try:
         title = str(rfb.get_title() if hasattr(rfb, "get_title") else "")
     except Exception:
         title = ""
-    # Get interactive elements summary via JS
     try:
         js = """() => {
-            const els = [];
-            document.querySelectorAll('a, button, input, select, textarea, [role=button], [role=tab], [role=link]').forEach((el, i) => {
+            const out = [];
+            let i = 0;
+            document.querySelectorAll('a, button, input, select, textarea, [role=button], [role=tab], [role=link], [role=menuitem], h1, h2, h3').forEach(el => {
                 if (el.offsetParent === null) return;
                 const tag = el.tagName.toLowerCase();
-                const text = (el.textContent || '').trim().slice(0, 80);
+                const text = (el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 60);
                 const href = el.getAttribute('href') || '';
                 const type = el.getAttribute('type') || '';
-                const placeholder = el.getAttribute('placeholder') || '';
+                const ph = el.getAttribute('placeholder') || '';
                 const role = el.getAttribute('role') || '';
-                const name = el.getAttribute('name') || '';
-                els.push({tag, text, href, type, placeholder, role, name});
+                let desc = '@e' + i + ' ' + tag;
+                if (role) desc += '[' + role + ']';
+                if (type) desc += '[type=' + type + ']';
+                if (ph) desc += ' "' + ph + '"';
+                else if (text) desc += ' "' + text + '"';
+                if (href) desc += ' href=' + href;
+                out.push(desc);
+                i++;
             });
-            return els;
+            return out;
         }"""
         elements = rfb.evaluate_javascript(None, js)
     except Exception:
         elements = []
-    return json.dumps({
-        "url": url,
-        "title": title,
-        "interactive_elements": elements[:50],
-    }, default=str)
+    lines = [f"URL: {url}", f"Title: {title}"]
+    for el in (elements or [])[:40]:
+        lines.append(str(el))
+    return "\n".join(lines)
 
 
 def _click(selector: str) -> str:
@@ -277,7 +285,7 @@ PLAYWRIGHT_EXPLORE_PROMPT = """You are a QA tester exploring a live web applicat
 
 ## Tools
 - browser_open(url) — navigate to URL
-- browser_snapshot() — see the current page (URL, title, interactive elements)
+- browser_snapshot() — compact view: URL + interactive elements (@e0, @e1, ...)
 - browser_click(selector) — click an element
 - browser_get_text(selector) — read element text
 - browser_get_count(selector) — count matching elements
@@ -288,11 +296,15 @@ PLAYWRIGHT_EXPLORE_PROMPT = """You are a QA tester exploring a live web applicat
 - browser_url() — get current URL
 - browser_wait(selector) — wait for element to appear
 
-## Rules
-1. Start with browser_snapshot() to see the current page state.
-2. Use CSS selectors. Check the snapshot for available elements.
-3. After clicking navigation, use browser_snapshot() to see the new page.
-4. When done with ALL steps, call journey_complete with detailed notes.
-5. If blocked (page broken, element missing), call journey_blocked.
-6. Do NOT stop early — complete every step in the story.
+## Efficiency rules
+1. Start with browser_snapshot() to see the current page.
+2. Chain multiple actions before taking another snapshot. Example: fill username, fill password, click submit — then snapshot to see the result. Don't snapshot between every action.
+3. Use CSS selectors from the snapshot. The @eN refs are for reference — use the actual CSS selector (tag, role, href, placeholder) to click/fill.
+4. After navigating to a new page, one snapshot tells you everything. Don't call get_text/get_count if the snapshot already shows the answer.
+5. Verify observations by reading the snapshot, not by individual get_text calls.
+
+## Completion
+- When done with ALL steps, call journey_complete with detailed notes.
+- If blocked (page broken, element missing, action fails), call journey_blocked.
+- Do NOT stop early — complete every step in the story.
 """
